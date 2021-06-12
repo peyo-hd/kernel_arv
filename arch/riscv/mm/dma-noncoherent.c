@@ -11,6 +11,7 @@
 #include <linux/of.h>
 #include <linux/of_device.h>
 #include <asm/cacheflush.h>
+#include <soc/sifive/sifive_ccache.h>
 
 unsigned int riscv_cbom_block_size;
 EXPORT_SYMBOL_GPL(riscv_cbom_block_size);
@@ -20,8 +21,14 @@ static bool noncoherent_supported;
 void arch_sync_dma_for_device(phys_addr_t paddr, size_t size,
 			      enum dma_data_direction dir)
 {
-	void *vaddr = phys_to_virt(paddr);
+	void *vaddr;
 
+	if (sifive_ccache_handle_noncoherent()) {
+		sifive_ccache_flush_range(paddr, size);
+		return;
+	}
+
+	vaddr = phys_to_virt(paddr);
 	switch (dir) {
 	case DMA_TO_DEVICE:
 		ALT_CMO_OP(clean, vaddr, size, riscv_cbom_block_size);
@@ -40,8 +47,14 @@ void arch_sync_dma_for_device(phys_addr_t paddr, size_t size,
 void arch_sync_dma_for_cpu(phys_addr_t paddr, size_t size,
 			   enum dma_data_direction dir)
 {
-	void *vaddr = phys_to_virt(paddr);
+	void *vaddr;
 
+	if (sifive_ccache_handle_noncoherent()) {
+		sifive_ccache_flush_range(paddr, size);
+		return;
+	}
+
+	vaddr = phys_to_virt(paddr);
 	switch (dir) {
 	case DMA_TO_DEVICE:
 		break;
@@ -54,9 +67,29 @@ void arch_sync_dma_for_cpu(phys_addr_t paddr, size_t size,
 	}
 }
 
+void *arch_dma_set_uncached(void *addr, size_t size)
+{
+	if (sifive_ccache_handle_noncoherent())
+		return sifive_ccache_set_uncached(addr, size);
+
+	return addr;
+}
+
+void arch_dma_clear_uncached(void *addr, size_t size)
+{
+	if (sifive_ccache_handle_noncoherent())
+		sifive_ccache_clear_uncached(addr, size);
+}
+
 void arch_dma_prep_coherent(struct page *page, size_t size)
 {
 	void *flush_addr = page_address(page);
+
+	if (sifive_ccache_handle_noncoherent()) {
+		memset(flush_addr, 0, size);
+		sifive_ccache_flush_range(__pa(flush_addr), size);
+		return;
+	}
 
 	ALT_CMO_OP(flush, flush_addr, size, riscv_cbom_block_size);
 }
