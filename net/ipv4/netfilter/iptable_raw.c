@@ -37,7 +37,7 @@ static unsigned int
 iptable_raw_hook(void *priv, struct sk_buff *skb,
 		 const struct nf_hook_state *state)
 {
-	return ipt_do_table(skb, state, priv);
+	return NF_ACCEPT;
 }
 
 static struct nf_hook_ops *rawtable_ops __read_mostly;
