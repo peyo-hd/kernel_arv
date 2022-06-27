@@ -199,7 +199,7 @@ static int ip6_finish_output(struct net *net, struct sock *sk, struct sk_buff *s
 {
 	int ret;
 
-	ret = BPF_CGROUP_RUN_PROG_INET_EGRESS(sk, skb);
+	ret = NET_XMIT_SUCCESS;
 	switch (ret) {
 	case NET_XMIT_SUCCESS:
 	case NET_XMIT_CN:
