@@ -69,7 +69,7 @@ ip6table_mangle_hook(void *priv, struct sk_buff *skb,
 {
 	if (state->hook == NF_INET_LOCAL_OUT)
 		return ip6t_mangle_out(priv, skb, state);
-	return ip6t_do_table(priv, skb, state);
+	return NF_ACCEPT;
 }
 
 static struct nf_hook_ops *mangle_ops __read_mostly;
