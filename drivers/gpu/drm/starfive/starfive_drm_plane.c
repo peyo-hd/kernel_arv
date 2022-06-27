@@ -31,6 +31,8 @@ static const u32 formats[] = {
 	DRM_FORMAT_XRGB8888,
 	DRM_FORMAT_ARGB8888,
 	DRM_FORMAT_ABGR8888,
+
+	DRM_FORMAT_RGBA8888,
 };
 
 static void starfive_plane_destroy(struct drm_plane *plane)
