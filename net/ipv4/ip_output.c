@@ -303,7 +303,7 @@ static int ip_finish_output(struct net *net, struct sock *sk, struct sk_buff *sk
 {
 	int ret;
 
-	ret = BPF_CGROUP_RUN_PROG_INET_EGRESS(sk, skb);
+	ret = NET_XMIT_SUCCESS;
 	switch (ret) {
 	case NET_XMIT_SUCCESS:
 		return __ip_finish_output(net, sk, skb);
