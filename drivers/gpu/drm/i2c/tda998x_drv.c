@@ -1832,8 +1832,8 @@ static int tda998x_create(struct device *dev)
 	INIT_WORK(&priv->detect_work, tda998x_detect_work);
 
 	priv->vip_cntrl_0 = VIP_CNTRL_0_SWAP_A(2) | VIP_CNTRL_0_SWAP_B(3);
-	priv->vip_cntrl_1 = VIP_CNTRL_1_SWAP_C(0) | VIP_CNTRL_1_SWAP_D(1);
-	priv->vip_cntrl_2 = VIP_CNTRL_2_SWAP_E(4) | VIP_CNTRL_2_SWAP_F(5);
+	priv->vip_cntrl_1 = VIP_CNTRL_1_SWAP_C(4) | VIP_CNTRL_1_SWAP_D(5);
+	priv->vip_cntrl_2 = VIP_CNTRL_2_SWAP_E(0) | VIP_CNTRL_2_SWAP_F(1);
 
 	/* CEC I2C address bound to TDA998x I2C addr by configuration pins */
 	priv->cec_addr = 0x34 + (client->addr & 0x03);
