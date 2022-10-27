@@ -234,12 +234,12 @@ static int device_area_is_invalid(struct dm_target *ti, struct dm_dev *dev,
 		return 0;
 
 	if ((start >= dev_size) || (start + len > dev_size)) {
-		DMWARN("%s: %pg too small for target: "
-		       "start=%llu, len=%llu, dev_size=%llu",
-		       dm_device_name(ti->table->md), bdev,
-		       (unsigned long long)start,
-		       (unsigned long long)len,
-		       (unsigned long long)dev_size);
+		DMERR("%s: %pg too small for target: "
+		      "start=%llu, len=%llu, dev_size=%llu",
+		      dm_device_name(ti->table->md), bdev,
+		      (unsigned long long)start,
+		      (unsigned long long)len,
+		      (unsigned long long)dev_size);
 		return 1;
 	}
 
@@ -251,10 +251,10 @@ static int device_area_is_invalid(struct dm_target *ti, struct dm_dev *dev,
 		unsigned int zone_sectors = bdev_zone_sectors(bdev);
 
 		if (start & (zone_sectors - 1)) {
-			DMWARN("%s: start=%llu not aligned to h/w zone size %u of %pg",
-			       dm_device_name(ti->table->md),
-			       (unsigned long long)start,
-			       zone_sectors, bdev);
+			DMERR("%s: start=%llu not aligned to h/w zone size %u of %pg",
+			      dm_device_name(ti->table->md),
+			      (unsigned long long)start,
+			      zone_sectors, bdev);
 			return 1;
 		}
 
@@ -268,10 +268,10 @@ static int device_area_is_invalid(struct dm_target *ti, struct dm_dev *dev,
 		 * the sector range.
 		 */
 		if (len & (zone_sectors - 1)) {
-			DMWARN("%s: len=%llu not aligned to h/w zone size %u of %pg",
-			       dm_device_name(ti->table->md),
-			       (unsigned long long)len,
-			       zone_sectors, bdev);
+			DMERR("%s: len=%llu not aligned to h/w zone size %u of %pg",
+			      dm_device_name(ti->table->md),
+			      (unsigned long long)len,
+			      zone_sectors, bdev);
 			return 1;
 		}
 	}
@@ -280,20 +280,20 @@ static int device_area_is_invalid(struct dm_target *ti, struct dm_dev *dev,
 		return 0;
 
 	if (start & (logical_block_size_sectors - 1)) {
-		DMWARN("%s: start=%llu not aligned to h/w "
-		       "logical block size %u of %pg",
-		       dm_device_name(ti->table->md),
-		       (unsigned long long)start,
-		       limits->logical_block_size, bdev);
+		DMERR("%s: start=%llu not aligned to h/w "
+		      "logical block size %u of %pg",
+		      dm_device_name(ti->table->md),
+		      (unsigned long long)start,
+		      limits->logical_block_size, bdev);
 		return 1;
 	}
 
 	if (len & (logical_block_size_sectors - 1)) {
-		DMWARN("%s: len=%llu not aligned to h/w "
-		       "logical block size %u of %pg",
-		       dm_device_name(ti->table->md),
-		       (unsigned long long)len,
-		       limits->logical_block_size, bdev);
+		DMERR("%s: len=%llu not aligned to h/w "
+		      "logical block size %u of %pg",
+		      dm_device_name(ti->table->md),
+		      (unsigned long long)len,
+		      limits->logical_block_size, bdev);
 		return 1;
 	}
 
@@ -434,8 +434,8 @@ void dm_put_device(struct dm_target *ti, struct dm_dev *d)
 		}
 	}
 	if (!found) {
-		DMWARN("%s: device %s not in table devices list",
-		       dm_device_name(ti->table->md), d->name);
+		DMERR("%s: device %s not in table devices list",
+		      dm_device_name(ti->table->md), d->name);
 		return;
 	}
 	if (refcount_dec_and_test(&dd->count)) {
@@ -618,12 +618,12 @@ static int validate_hardware_logical_block_alignment(struct dm_table *t,
 	}
 
 	if (remaining) {
-		DMWARN("%s: table line %u (start sect %llu len %llu) "
-		       "not aligned to h/w logical block size %u",
-		       dm_device_name(t->md), i,
-		       (unsigned long long) ti->begin,
-		       (unsigned long long) ti->len,
-		       limits->logical_block_size);
+		DMERR("%s: table line %u (start sect %llu len %llu) "
+		      "not aligned to h/w logical block size %u",
+		      dm_device_name(t->md), i,
+		      (unsigned long long) ti->begin,
+		      (unsigned long long) ti->len,
+		      limits->logical_block_size);
 		return -EINVAL;
 	}
 
@@ -1008,7 +1008,7 @@ static int dm_table_alloc_md_mempools(struct dm_table *t, struct mapped_device *
 	struct dm_md_mempools *pools;
 
 	if (unlikely(type == DM_TYPE_NONE)) {
-		DMWARN("no table type is set, can't allocate mempools");
+		DMERR("no table type is set, can't allocate mempools");
 		return -EINVAL;
 	}
 
@@ -1112,7 +1112,7 @@ static bool integrity_profile_exists(struct gendisk *disk)
  * Get a disk whose integrity profile reflects the table's profile.
  * Returns NULL if integrity support was inconsistent or unavailable.
  */
-static struct gendisk * dm_table_get_integrity_disk(struct dm_table *t)
+static struct gendisk *dm_table_get_integrity_disk(struct dm_table *t)
 {
 	struct list_head *devices = dm_table_get_devices(t);
 	struct dm_dev_internal *dd = NULL;
@@ -1185,10 +1185,10 @@ static int dm_table_register_integrity(struct dm_table *t)
 	 * profile the new profile should not conflict.
 	 */
 	if (blk_integrity_compare(dm_disk(md), template_disk) < 0) {
-		DMWARN("%s: conflict with existing integrity profile: "
-		       "%s profile mismatch",
-		       dm_device_name(t->md),
-		       template_disk->disk_name);
+		DMERR("%s: conflict with existing integrity profile: "
+		      "%s profile mismatch",
+		      dm_device_name(t->md),
+		      template_disk->disk_name);
 		return 1;
 	}
 
@@ -1251,6 +1251,70 @@ static int dm_keyslot_evict(struct blk_crypto_profile *profile,
 	return args.err;
 }
 
+struct dm_derive_sw_secret_args {
+	const u8 *wrapped_key;
+	unsigned int wrapped_key_size;
+	u8 *secret;
+	int err;
+};
+
+static int dm_derive_sw_secret_callback(struct dm_target *ti,
+					struct dm_dev *dev, sector_t start,
+					sector_t len, void *data)
+{
+	struct dm_derive_sw_secret_args *args = data;
+	struct request_queue *q = bdev_get_queue(dev->bdev);
+
+	if (!args->err)
+		return 0;
+
+	args->err = blk_crypto_derive_sw_secret(q->crypto_profile,
+						args->wrapped_key,
+						args->wrapped_key_size,
+						args->secret);
+	/* Try another device in case this fails. */
+	return 0;
+}
+
+/*
+ * Retrieve the sw_secret from the underlying device.  Given that only one
+ * sw_secret can exist for a particular wrapped key, retrieve it only from the
+ * first device that supports derive_sw_secret().
+ */
+static int dm_derive_sw_secret(struct blk_crypto_profile *profile,
+			       const u8 *wrapped_key,
+			       unsigned int wrapped_key_size,
+			       u8 secret[BLK_CRYPTO_SW_SECRET_SIZE])
+{
+	struct mapped_device *md =
+		container_of(profile, struct dm_crypto_profile, profile)->md;
+	struct dm_derive_sw_secret_args args = {
+		.wrapped_key = wrapped_key,
+		.wrapped_key_size = wrapped_key_size,
+		.secret = secret,
+		.err = -EOPNOTSUPP,
+	};
+	struct dm_table *t;
+	int srcu_idx;
+	int i;
+	struct dm_target *ti;
+
+	t = dm_get_live_table(md, &srcu_idx);
+	if (!t)
+		return -EOPNOTSUPP;
+	for (i = 0; i < t->num_targets; i++) {
+		ti = dm_table_get_target(t, i);
+		if (!ti->type->iterate_devices)
+			continue;
+		ti->type->iterate_devices(ti, dm_derive_sw_secret_callback,
+					  &args);
+		if (!args.err)
+			break;
+	}
+	dm_put_live_table(md, srcu_idx);
+	return args.err;
+}
+
 static int
 device_intersect_crypto_capabilities(struct dm_target *ti, struct dm_dev *dev,
 				     sector_t start, sector_t len, void *data)
@@ -1306,9 +1370,11 @@ static int dm_table_construct_crypto_profile(struct dm_table *t)
 	profile = &dmcp->profile;
 	blk_crypto_profile_init(profile, 0);
 	profile->ll_ops.keyslot_evict = dm_keyslot_evict;
+	profile->ll_ops.derive_sw_secret = dm_derive_sw_secret;
 	profile->max_dun_bytes_supported = UINT_MAX;
 	memset(profile->modes_supported, 0xFF,
 	       sizeof(profile->modes_supported));
+	profile->key_types_supported = ~0;
 
 	for (i = 0; i < t->num_targets; i++) {
 		struct dm_target *ti = dm_table_get_target(t, i);
@@ -1327,7 +1393,7 @@ static int dm_table_construct_crypto_profile(struct dm_table *t)
 	if (t->md->queue &&
 	    !blk_crypto_has_capabilities(profile,
 					 t->md->queue->crypto_profile)) {
-		DMWARN("Inline encryption capabilities of new DM table were more restrictive than the old table's. This is not supported!");
+		DMERR("Inline encryption capabilities of new DM table were more restrictive than the old table's. This is not supported!");
 		dm_destroy_crypto_profile(profile);
 		return -EINVAL;
 	}
