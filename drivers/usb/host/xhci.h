@@ -1762,6 +1762,13 @@ struct xhci_hub {
 	u8			min_rev;
 };
 
+struct xhci_lowmem_pool {
+	struct gen_pool *pool;
+	u64		cached_base;
+	dma_addr_t	dma_addr;
+	unsigned int	size;
+};
+
 /* There is one xhci_hcd structure per controller */
 struct xhci_hcd {
 	struct usb_hcd *main_hcd;
@@ -1918,6 +1925,8 @@ struct xhci_hcd {
 #define XHCI_SUSPEND_RESUME_CLKS	BIT_ULL(43)
 #define XHCI_RESET_TO_DEFAULT	BIT_ULL(44)
 
+#define XHCI_LOCAL_BUFFER	BIT_ULL(63)
+
 	unsigned int		num_active_eps;
 	unsigned int		limit_active_eps;
 	struct xhci_port	*hw_ports;
@@ -1945,7 +1954,8 @@ struct xhci_hcd {
 	struct list_head	regset_list;
 
 	void			*dbc;
-
+	struct xhci_lowmem_pool lowmem_pool;
+ 
 	ANDROID_KABI_RESERVE(1);
 	ANDROID_KABI_RESERVE(2);
 	ANDROID_KABI_RESERVE(3);
