@@ -224,17 +224,17 @@ void SysDevHost_Cache_Maintenance(IMG_HANDLE hSysData,
 
 static IMG_UINT32 sys_gpu_runtime_resume(IMG_HANDLE hd)
 {
-	starfive_pmu_hw_event_turn_off_mask(0);
-	clk_prepare_enable(sf_cfg_t.clk_axi);
-	u0_img_gpu_enable();
+  //starfive_pmu_hw_event_turn_off_mask(0);
+  //clk_prepare_enable(sf_cfg_t.clk_axi);
+  //	u0_img_gpu_enable();
 
 	return 0;
 }
 
 static IMG_UINT32 sys_gpu_runtime_suspend(IMG_HANDLE hd)
 {
-	u0_img_gpu_disable();
-	starfive_pmu_hw_event_turn_off_mask((uint32_t)-1);
+  //u0_img_gpu_disable();
+  //starfive_pmu_hw_event_turn_off_mask((uint32_t)-1);
 
 	return 0;
 }
