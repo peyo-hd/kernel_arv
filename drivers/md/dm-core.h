@@ -13,7 +13,7 @@
 #include <linux/ktime.h>
 #include <linux/genhd.h>
 #include <linux/blk-mq.h>
-#include <linux/keyslot-manager.h>
+#include <linux/blk-crypto-profile.h>
 
 #include <trace/events/block.h>
 
@@ -64,6 +64,8 @@ struct mapped_device {
 	char name[16];
 	struct gendisk *disk;
 	struct dax_device *dax_dev;
+
+	unsigned long __percpu *pending_io;
 
 	/*
 	 * A list of ios that arrived while we were suspended.
@@ -200,7 +202,7 @@ struct dm_table {
 	struct dm_md_mempools *mempools;
 
 #ifdef CONFIG_BLK_INLINE_ENCRYPTION
-	struct blk_keyslot_manager *ksm;
+	struct blk_crypto_profile *crypto_profile;
 #endif
 };
 

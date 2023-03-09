@@ -1093,6 +1093,7 @@ start_over:
 			goto check_out;
 		pr_debug("scan_swap_map of si %d failed to find offset\n",
 			si->type);
+		cond_resched();
 
 		spin_lock(&swap_avail_lock);
 nextsi:
@@ -3409,6 +3410,7 @@ void si_swapinfo(struct sysinfo *val)
 	val->totalswap = total_swap_pages + nr_to_be_unused;
 	spin_unlock(&swap_lock);
 }
+EXPORT_SYMBOL_NS_GPL(si_swapinfo, MINIDUMP);
 
 /*
  * Verify that a swap entry is valid and increment its swap map count.

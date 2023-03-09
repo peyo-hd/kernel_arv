@@ -864,11 +864,36 @@ static int ath10k_peer_delete(struct ath10k *ar, u32 vdev_id, const u8 *addr)
 	return 0;
 }
 
+static void ath10k_peer_map_cleanup(struct ath10k *ar, struct ath10k_peer *peer)
+{
+	int peer_id, i;
+
+	lockdep_assert_held(&ar->conf_mutex);
+
+	for_each_set_bit(peer_id, peer->peer_ids,
+			 ATH10K_MAX_NUM_PEER_IDS) {
+		ar->peer_map[peer_id] = NULL;
+	}
+
+	/* Double check that peer is properly un-referenced from
+	 * the peer_map
+	 */
+	for (i = 0; i < ARRAY_SIZE(ar->peer_map); i++) {
+		if (ar->peer_map[i] == peer) {
+			ath10k_warn(ar, "removing stale peer_map entry for %pM (ptr %pK idx %d)\n",
+				    peer->addr, peer, i);
+			ar->peer_map[i] = NULL;
+		}
+	}
+
+	list_del(&peer->list);
+	kfree(peer);
+	ar->num_peers--;
+}
+
 static void ath10k_peer_cleanup(struct ath10k *ar, u32 vdev_id)
 {
 	struct ath10k_peer *peer, *tmp;
-	int peer_id;
-	int i;
 
 	lockdep_assert_held(&ar->conf_mutex);
 
@@ -880,25 +905,7 @@ static void ath10k_peer_cleanup(struct ath10k *ar, u32 vdev_id)
 		ath10k_warn(ar, "removing stale peer %pM from vdev_id %d\n",
 			    peer->addr, vdev_id);
 
-		for_each_set_bit(peer_id, peer->peer_ids,
-				 ATH10K_MAX_NUM_PEER_IDS) {
-			ar->peer_map[peer_id] = NULL;
-		}
-
-		/* Double check that peer is properly un-referenced from
-		 * the peer_map
-		 */
-		for (i = 0; i < ARRAY_SIZE(ar->peer_map); i++) {
-			if (ar->peer_map[i] == peer) {
-				ath10k_warn(ar, "removing stale peer_map entry for %pM (ptr %pK idx %d)\n",
-					    peer->addr, peer, i);
-				ar->peer_map[i] = NULL;
-			}
-		}
-
-		list_del(&peer->list);
-		kfree(peer);
-		ar->num_peers--;
+		ath10k_peer_map_cleanup(ar, peer);
 	}
 	spin_unlock_bh(&ar->data_lock);
 }
@@ -993,8 +1000,12 @@ static void ath10k_mac_vif_beacon_cleanup(struct ath10k_vif *arvif)
 	ath10k_mac_vif_beacon_free(arvif);
 
 	if (arvif->beacon_buf) {
-		dma_free_coherent(ar->dev, IEEE80211_MAX_FRAME_LEN,
-				  arvif->beacon_buf, arvif->beacon_paddr);
+		if (ar->bus_param.dev_type == ATH10K_DEV_TYPE_HL)
+			kfree(arvif->beacon_buf);
+		else
+			dma_free_coherent(ar->dev, IEEE80211_MAX_FRAME_LEN,
+					  arvif->beacon_buf,
+					  arvif->beacon_paddr);
 		arvif->beacon_buf = NULL;
 	}
 }
@@ -1048,7 +1059,7 @@ static int ath10k_monitor_vdev_start(struct ath10k *ar, int vdev_id)
 	arg.channel.min_power = 0;
 	arg.channel.max_power = channel->max_power * 2;
 	arg.channel.max_reg_power = channel->max_reg_power * 2;
-	arg.channel.max_antenna_gain = channel->max_antenna_gain * 2;
+	arg.channel.max_antenna_gain = channel->max_antenna_gain;
 
 	reinit_completion(&ar->vdev_setup_done);
 	reinit_completion(&ar->vdev_delete_done);
@@ -1494,7 +1505,7 @@ static int ath10k_vdev_start_restart(struct ath10k_vif *arvif,
 	arg.channel.min_power = 0;
 	arg.channel.max_power = chandef->chan->max_power * 2;
 	arg.channel.max_reg_power = chandef->chan->max_reg_power * 2;
-	arg.channel.max_antenna_gain = chandef->chan->max_antenna_gain * 2;
+	arg.channel.max_antenna_gain = chandef->chan->max_antenna_gain;
 
 	if (arvif->vdev_type == WMI_VDEV_TYPE_AP) {
 		arg.ssid = arvif->u.ap.ssid;
@@ -2247,7 +2258,7 @@ static void ath10k_peer_assoc_h_rates(struct ath10k *ar,
 
 	band = def.chan->band;
 	sband = ar->hw->wiphy->bands[band];
-	ratemask = sta->supp_rates[band];
+	ratemask = sta->deflink.supp_rates[band];
 	ratemask &= arvif->bitrate_mask.control[band].legacy;
 	rates = sband->bitrates;
 
@@ -2292,7 +2303,7 @@ static void ath10k_peer_assoc_h_ht(struct ath10k *ar,
 				   struct ieee80211_sta *sta,
 				   struct wmi_peer_assoc_complete_arg *arg)
 {
-	const struct ieee80211_sta_ht_cap *ht_cap = &sta->ht_cap;
+	const struct ieee80211_sta_ht_cap *ht_cap = &sta->deflink.ht_cap;
 	struct ath10k_vif *arvif = (void *)vif->drv_priv;
 	struct cfg80211_chan_def def;
 	enum nl80211_band band;
@@ -2331,7 +2342,7 @@ static void ath10k_peer_assoc_h_ht(struct ath10k *ar,
 	if (ht_cap->cap & IEEE80211_HT_CAP_LDPC_CODING)
 		arg->peer_flags |= ar->wmi.peer_flags->ldbc;
 
-	if (sta->bandwidth >= IEEE80211_STA_RX_BW_40) {
+	if (sta->deflink.bandwidth >= IEEE80211_STA_RX_BW_40) {
 		arg->peer_flags |= ar->wmi.peer_flags->bw40;
 		arg->peer_rate_caps |= WMI_RC_CW40_FLAG;
 	}
@@ -2384,7 +2395,8 @@ static void ath10k_peer_assoc_h_ht(struct ath10k *ar,
 			arg->peer_ht_rates.rates[i] = i;
 	} else {
 		arg->peer_ht_rates.num_rates = n;
-		arg->peer_num_spatial_streams = min(sta->rx_nss, max_nss);
+		arg->peer_num_spatial_streams = min(sta->deflink.rx_nss,
+						    max_nss);
 	}
 
 	ath10k_dbg(ar, ATH10K_DBG_MAC, "mac ht peer %pM mcs cnt %d nss %d\n",
@@ -2541,7 +2553,7 @@ static void ath10k_peer_assoc_h_vht(struct ath10k *ar,
 				    struct ieee80211_sta *sta,
 				    struct wmi_peer_assoc_complete_arg *arg)
 {
-	const struct ieee80211_sta_vht_cap *vht_cap = &sta->vht_cap;
+	const struct ieee80211_sta_vht_cap *vht_cap = &sta->deflink.vht_cap;
 	struct ath10k_vif *arvif = (void *)vif->drv_priv;
 	struct ath10k_hw_params *hw = &ar->hw_params;
 	struct cfg80211_chan_def def;
@@ -2583,10 +2595,10 @@ static void ath10k_peer_assoc_h_vht(struct ath10k *ar,
 				 (1U << (IEEE80211_HT_MAX_AMPDU_FACTOR +
 					ampdu_factor)) - 1);
 
-	if (sta->bandwidth == IEEE80211_STA_RX_BW_80)
+	if (sta->deflink.bandwidth == IEEE80211_STA_RX_BW_80)
 		arg->peer_flags |= ar->wmi.peer_flags->bw80;
 
-	if (sta->bandwidth == IEEE80211_STA_RX_BW_160)
+	if (sta->deflink.bandwidth == IEEE80211_STA_RX_BW_160)
 		arg->peer_flags |= ar->wmi.peer_flags->bw160;
 
 	/* Calculate peer NSS capability from VHT capabilities if STA
@@ -2600,7 +2612,7 @@ static void ath10k_peer_assoc_h_vht(struct ath10k *ar,
 		    vht_mcs_mask[i])
 			max_nss = i + 1;
 	}
-	arg->peer_num_spatial_streams = min(sta->rx_nss, max_nss);
+	arg->peer_num_spatial_streams = min(sta->deflink.rx_nss, max_nss);
 	arg->peer_vht_rates.rx_max_rate =
 		__le16_to_cpu(vht_cap->vht_mcs.rx_highest);
 	arg->peer_vht_rates.rx_mcs_set =
@@ -2680,15 +2692,15 @@ static void ath10k_peer_assoc_h_qos(struct ath10k *ar,
 
 static bool ath10k_mac_sta_has_ofdm_only(struct ieee80211_sta *sta)
 {
-	return sta->supp_rates[NL80211_BAND_2GHZ] >>
+	return sta->deflink.supp_rates[NL80211_BAND_2GHZ] >>
 	       ATH10K_MAC_FIRST_OFDM_RATE_IDX;
 }
 
 static enum wmi_phy_mode ath10k_mac_get_phymode_vht(struct ath10k *ar,
 						    struct ieee80211_sta *sta)
 {
-	if (sta->bandwidth == IEEE80211_STA_RX_BW_160) {
-		switch (sta->vht_cap.cap & IEEE80211_VHT_CAP_SUPP_CHAN_WIDTH_MASK) {
+	if (sta->deflink.bandwidth == IEEE80211_STA_RX_BW_160) {
+		switch (sta->deflink.vht_cap.cap & IEEE80211_VHT_CAP_SUPP_CHAN_WIDTH_MASK) {
 		case IEEE80211_VHT_CAP_SUPP_CHAN_WIDTH_160MHZ:
 			return MODE_11AC_VHT160;
 		case IEEE80211_VHT_CAP_SUPP_CHAN_WIDTH_160_80PLUS80MHZ:
@@ -2699,13 +2711,13 @@ static enum wmi_phy_mode ath10k_mac_get_phymode_vht(struct ath10k *ar,
 		}
 	}
 
-	if (sta->bandwidth == IEEE80211_STA_RX_BW_80)
+	if (sta->deflink.bandwidth == IEEE80211_STA_RX_BW_80)
 		return MODE_11AC_VHT80;
 
-	if (sta->bandwidth == IEEE80211_STA_RX_BW_40)
+	if (sta->deflink.bandwidth == IEEE80211_STA_RX_BW_40)
 		return MODE_11AC_VHT40;
 
-	if (sta->bandwidth == IEEE80211_STA_RX_BW_20)
+	if (sta->deflink.bandwidth == IEEE80211_STA_RX_BW_20)
 		return MODE_11AC_VHT20;
 
 	return MODE_UNKNOWN;
@@ -2732,15 +2744,15 @@ static void ath10k_peer_assoc_h_phymode(struct ath10k *ar,
 
 	switch (band) {
 	case NL80211_BAND_2GHZ:
-		if (sta->vht_cap.vht_supported &&
+		if (sta->deflink.vht_cap.vht_supported &&
 		    !ath10k_peer_assoc_h_vht_masked(vht_mcs_mask)) {
-			if (sta->bandwidth == IEEE80211_STA_RX_BW_40)
+			if (sta->deflink.bandwidth == IEEE80211_STA_RX_BW_40)
 				phymode = MODE_11AC_VHT40;
 			else
 				phymode = MODE_11AC_VHT20;
-		} else if (sta->ht_cap.ht_supported &&
+		} else if (sta->deflink.ht_cap.ht_supported &&
 			   !ath10k_peer_assoc_h_ht_masked(ht_mcs_mask)) {
-			if (sta->bandwidth == IEEE80211_STA_RX_BW_40)
+			if (sta->deflink.bandwidth == IEEE80211_STA_RX_BW_40)
 				phymode = MODE_11NG_HT40;
 			else
 				phymode = MODE_11NG_HT20;
@@ -2755,12 +2767,12 @@ static void ath10k_peer_assoc_h_phymode(struct ath10k *ar,
 		/*
 		 * Check VHT first.
 		 */
-		if (sta->vht_cap.vht_supported &&
+		if (sta->deflink.vht_cap.vht_supported &&
 		    !ath10k_peer_assoc_h_vht_masked(vht_mcs_mask)) {
 			phymode = ath10k_mac_get_phymode_vht(ar, sta);
-		} else if (sta->ht_cap.ht_supported &&
+		} else if (sta->deflink.ht_cap.ht_supported &&
 			   !ath10k_peer_assoc_h_ht_masked(ht_mcs_mask)) {
-			if (sta->bandwidth >= IEEE80211_STA_RX_BW_40)
+			if (sta->deflink.bandwidth >= IEEE80211_STA_RX_BW_40)
 				phymode = MODE_11NA_HT40;
 			else
 				phymode = MODE_11NA_HT20;
@@ -3075,8 +3087,8 @@ static void ath10k_bss_assoc(struct ieee80211_hw *hw,
 	/* ap_sta must be accessed only within rcu section which must be left
 	 * before calling ath10k_setup_peer_smps() which might sleep.
 	 */
-	ht_cap = ap_sta->ht_cap;
-	vht_cap = ap_sta->vht_cap;
+	ht_cap = ap_sta->deflink.ht_cap;
+	vht_cap = ap_sta->deflink.vht_cap;
 
 	ret = ath10k_peer_assoc_prepare(ar, vif, ap_sta, &peer_arg);
 	if (ret) {
@@ -3274,7 +3286,7 @@ static int ath10k_station_assoc(struct ath10k *ar,
 	 */
 	if (!reassoc) {
 		ret = ath10k_setup_peer_smps(ar, arvif, sta->addr,
-					     &sta->ht_cap);
+					     &sta->deflink.ht_cap);
 		if (ret) {
 			ath10k_warn(ar, "failed to setup peer SMPS for vdev %d: %d\n",
 				    arvif->vdev_id, ret);
@@ -3422,7 +3434,7 @@ static int ath10k_update_channel_list(struct ath10k *ar)
 			ch->min_power = 0;
 			ch->max_power = channel->max_power * 2;
 			ch->max_reg_power = channel->max_reg_power * 2;
-			ch->max_antenna_gain = channel->max_antenna_gain * 2;
+			ch->max_antenna_gain = channel->max_antenna_gain;
 			ch->reg_class_id = 0; /* FIXME */
 
 			/* FIXME: why use only legacy modes, why not any
@@ -5335,13 +5347,29 @@ err:
 static void ath10k_stop(struct ieee80211_hw *hw)
 {
 	struct ath10k *ar = hw->priv;
+	u32 opt;
 
 	ath10k_drain_tx(ar);
 
 	mutex_lock(&ar->conf_mutex);
 	if (ar->state != ATH10K_STATE_OFF) {
-		if (!ar->hw_rfkill_on)
-			ath10k_halt(ar);
+		if (!ar->hw_rfkill_on) {
+			/* If the current driver state is RESTARTING but not yet
+			 * fully RESTARTED because of incoming suspend event,
+			 * then ath10k_halt() is already called via
+			 * ath10k_core_restart() and should not be called here.
+			 */
+			if (ar->state != ATH10K_STATE_RESTARTING) {
+				ath10k_halt(ar);
+			} else {
+				/* Suspending here, because when in RESTARTING
+				 * state, ath10k_core_stop() skips
+				 * ath10k_wait_for_suspend().
+				 */
+				opt = WMI_PDEV_SUSPEND_AND_DISABLE_INTR;
+				ath10k_wait_for_suspend(ar, opt);
+			}
+		}
 		ar->state = ATH10K_STATE_OFF;
 	}
 	mutex_unlock(&ar->conf_mutex);
@@ -5576,10 +5604,25 @@ static int ath10k_add_interface(struct ieee80211_hw *hw,
 	if (vif->type == NL80211_IFTYPE_ADHOC ||
 	    vif->type == NL80211_IFTYPE_MESH_POINT ||
 	    vif->type == NL80211_IFTYPE_AP) {
-		arvif->beacon_buf = dma_alloc_coherent(ar->dev,
-						       IEEE80211_MAX_FRAME_LEN,
-						       &arvif->beacon_paddr,
-						       GFP_ATOMIC);
+		if (ar->bus_param.dev_type == ATH10K_DEV_TYPE_HL) {
+			arvif->beacon_buf = kmalloc(IEEE80211_MAX_FRAME_LEN,
+						    GFP_KERNEL);
+
+			/* Using a kernel pointer in place of a dma_addr_t
+			 * token can lead to undefined behavior if that
+			 * makes it into cache management functions. Use a
+			 * known-invalid address token instead, which
+			 * avoids the warning and makes it easier to catch
+			 * bugs if it does end up getting used.
+			 */
+			arvif->beacon_paddr = DMA_MAPPING_ERROR;
+		} else {
+			arvif->beacon_buf =
+				dma_alloc_coherent(ar->dev,
+						   IEEE80211_MAX_FRAME_LEN,
+						   &arvif->beacon_paddr,
+						   GFP_ATOMIC);
+		}
 		if (!arvif->beacon_buf) {
 			ret = -ENOMEM;
 			ath10k_warn(ar, "failed to allocate beacon buffer: %d\n",
@@ -5794,8 +5837,12 @@ err_vdev_delete:
 
 err:
 	if (arvif->beacon_buf) {
-		dma_free_coherent(ar->dev, IEEE80211_MAX_FRAME_LEN,
-				  arvif->beacon_buf, arvif->beacon_paddr);
+		if (ar->bus_param.dev_type == ATH10K_DEV_TYPE_HL)
+			kfree(arvif->beacon_buf);
+		else
+			dma_free_coherent(ar->dev, IEEE80211_MAX_FRAME_LEN,
+					  arvif->beacon_buf,
+					  arvif->beacon_paddr);
 		arvif->beacon_buf = NULL;
 	}
 
@@ -6763,10 +6810,10 @@ static int ath10k_sta_set_txpwr(struct ieee80211_hw *hw,
 	int ret = 0;
 	s16 txpwr;
 
-	if (sta->txpwr.type == NL80211_TX_POWER_AUTOMATIC) {
+	if (sta->deflink.txpwr.type == NL80211_TX_POWER_AUTOMATIC) {
 		txpwr = 0;
 	} else {
-		txpwr = sta->txpwr.power;
+		txpwr = sta->deflink.txpwr.power;
 		if (!txpwr)
 			return -EINVAL;
 	}
@@ -6886,26 +6933,26 @@ static int ath10k_mac_validate_rate_mask(struct ath10k *ar,
 					 struct ieee80211_sta *sta,
 					 u32 rate_ctrl_flag, u8 nss)
 {
-	if (nss > sta->rx_nss) {
+	if (nss > sta->deflink.rx_nss) {
 		ath10k_warn(ar, "Invalid nss field, configured %u limit %u\n",
-			    nss, sta->rx_nss);
+			    nss, sta->deflink.rx_nss);
 		return -EINVAL;
 	}
 
 	if (ATH10K_HW_PREAMBLE(rate_ctrl_flag) == WMI_RATE_PREAMBLE_VHT) {
-		if (!sta->vht_cap.vht_supported) {
+		if (!sta->deflink.vht_cap.vht_supported) {
 			ath10k_warn(ar, "Invalid VHT rate for sta %pM\n",
 				    sta->addr);
 			return -EINVAL;
 		}
 	} else if (ATH10K_HW_PREAMBLE(rate_ctrl_flag) == WMI_RATE_PREAMBLE_HT) {
-		if (!sta->ht_cap.ht_supported || sta->vht_cap.vht_supported) {
+		if (!sta->deflink.ht_cap.ht_supported || sta->deflink.vht_cap.vht_supported) {
 			ath10k_warn(ar, "Invalid HT rate for sta %pM\n",
 				    sta->addr);
 			return -EINVAL;
 		}
 	} else {
-		if (sta->ht_cap.ht_supported || sta->vht_cap.vht_supported)
+		if (sta->deflink.ht_cap.ht_supported || sta->deflink.vht_cap.vht_supported)
 			return -EINVAL;
 	}
 
@@ -7541,10 +7588,7 @@ static int ath10k_sta_state(struct ieee80211_hw *hw,
 				/* Clean up the peer object as well since we
 				 * must have failed to do this above.
 				 */
-				list_del(&peer->list);
-				ar->peer_map[i] = NULL;
-				kfree(peer);
-				ar->num_peers--;
+				ath10k_peer_map_cleanup(ar, peer);
 			}
 		}
 		spin_unlock_bh(&ar->data_lock);
@@ -8248,7 +8292,7 @@ static bool ath10k_mac_set_vht_bitrate_mask_fixup(struct ath10k *ar,
 	u8 rate = arvif->vht_pfr;
 
 	/* skip non vht and multiple rate peers */
-	if (!sta->vht_cap.vht_supported || arvif->vht_num_rates != 1)
+	if (!sta->deflink.vht_cap.vht_supported || arvif->vht_num_rates != 1)
 		return false;
 
 	err = ath10k_wmi_peer_set_param(ar, arvif->vdev_id, sta->addr,
@@ -8289,7 +8333,7 @@ static void ath10k_mac_clr_bitrate_mask_iter(void *data,
 	int err;
 
 	/* clear vht peers only */
-	if (arsta->arvif != arvif || !sta->vht_cap.vht_supported)
+	if (arsta->arvif != arvif || !sta->deflink.vht_cap.vht_supported)
 		return;
 
 	err = ath10k_wmi_peer_set_param(ar, arvif->vdev_id, sta->addr,
@@ -8433,13 +8477,14 @@ static void ath10k_sta_rc_update(struct ieee80211_hw *hw,
 
 	ath10k_dbg(ar, ATH10K_DBG_STA,
 		   "mac sta rc update for %pM changed %08x bw %d nss %d smps %d\n",
-		   sta->addr, changed, sta->bandwidth, sta->rx_nss,
+		   sta->addr, changed, sta->deflink.bandwidth,
+		   sta->deflink.rx_nss,
 		   sta->smps_mode);
 
 	if (changed & IEEE80211_RC_BW_CHANGED) {
 		bw = WMI_PEER_CHWIDTH_20MHZ;
 
-		switch (sta->bandwidth) {
+		switch (sta->deflink.bandwidth) {
 		case IEEE80211_STA_RX_BW_20:
 			bw = WMI_PEER_CHWIDTH_20MHZ;
 			break;
@@ -8454,7 +8499,7 @@ static void ath10k_sta_rc_update(struct ieee80211_hw *hw,
 			break;
 		default:
 			ath10k_warn(ar, "Invalid bandwidth %d in rc update for %pM\n",
-				    sta->bandwidth, sta->addr);
+				    sta->deflink.bandwidth, sta->addr);
 			bw = WMI_PEER_CHWIDTH_20MHZ;
 			break;
 		}
@@ -8463,7 +8508,7 @@ static void ath10k_sta_rc_update(struct ieee80211_hw *hw,
 	}
 
 	if (changed & IEEE80211_RC_NSS_CHANGED)
-		arsta->nss = sta->rx_nss;
+		arsta->nss = sta->deflink.rx_nss;
 
 	if (changed & IEEE80211_RC_SMPS_CHANGED) {
 		smps = WMI_PEER_SMPS_PS_NONE;

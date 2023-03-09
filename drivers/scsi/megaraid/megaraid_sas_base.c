@@ -2126,6 +2126,9 @@ static int megasas_slave_alloc(struct scsi_device *sdev)
 			goto scan_target;
 		}
 		return -ENXIO;
+	} else if (!MEGASAS_IS_LUN_VALID(sdev)) {
+		sdev_printk(KERN_INFO, sdev, "%s: invalid LUN\n", __func__);
+		return -ENXIO;
 	}
 
 scan_target:
@@ -2156,6 +2159,10 @@ static void megasas_slave_destroy(struct scsi_device *sdev)
 	instance = megasas_lookup_instance(sdev->host->host_no);
 
 	if (MEGASAS_IS_LOGICAL(sdev)) {
+		if (!MEGASAS_IS_LUN_VALID(sdev)) {
+			sdev_printk(KERN_INFO, sdev, "%s: invalid LUN\n", __func__);
+			return;
+		}
 		ld_tgt_id = MEGASAS_TARGET_ID(sdev);
 		instance->ld_tgtid_status[ld_tgt_id] = LD_TARGET_ID_DELETED;
 		if (megasas_dbg_lvl & LD_PD_DEBUG)
@@ -2920,15 +2927,14 @@ static int megasas_generic_reset(struct scsi_cmnd *scmd)
  * Sets the FW busy flag and reduces the host->can_queue if the
  * cmd has not been completed within the timeout period.
  */
-static enum
-blk_eh_timer_return megasas_reset_timer(struct scsi_cmnd *scmd)
+static enum scsi_timeout_action megasas_reset_timer(struct scsi_cmnd *scmd)
 {
 	struct megasas_instance *instance;
 	unsigned long flags;
 
 	if (time_after(jiffies, scmd->jiffies_at_alloc +
 				(scmd_timeout * 2) * HZ)) {
-		return BLK_EH_DONE;
+		return SCSI_EH_NOT_HANDLED;
 	}
 
 	instance = (struct megasas_instance *)scmd->device->host->hostdata;
@@ -2942,7 +2948,7 @@ blk_eh_timer_return megasas_reset_timer(struct scsi_cmnd *scmd)
 
 		spin_unlock_irqrestore(instance->host->host_lock, flags);
 	}
-	return BLK_EH_RESET_TIMER;
+	return SCSI_EH_RESET_TIMER;
 }
 
 /**
@@ -3188,6 +3194,9 @@ static int megasas_map_queues(struct Scsi_Host *shost)
 	blk_mq_pci_map_queues(map, instance->pdev, offset);
 	qoff += map->nr_queues;
 	offset += map->nr_queues;
+
+	/* we never use READ queue, so can't cheat blk-mq */
+	shost->tag_set.map[HCTX_TYPE_READ].nr_queues = 0;
 
 	/* Setup Poll hctx */
 	map = &shost->tag_set.map[HCTX_TYPE_POLL];

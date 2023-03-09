@@ -25,6 +25,7 @@
 #include <linux/perf_event.h>
 #include <linux/preempt.h>
 #include <linux/hugetlb.h>
+#include <linux/vm_event_item.h>
 
 #include <asm/acpi.h>
 #include <asm/bug.h>
@@ -41,9 +42,12 @@
 #include <asm/system_misc.h>
 #include <asm/tlbflush.h>
 #include <asm/traps.h>
+#include <asm/virt.h>
+
+#include <trace/hooks/fault.h>
 
 struct fault_info {
-	int	(*fn)(unsigned long far, unsigned int esr,
+	int	(*fn)(unsigned long far, unsigned long esr,
 		      struct pt_regs *regs);
 	int	sig;
 	int	code;
@@ -53,17 +57,17 @@ struct fault_info {
 static const struct fault_info fault_info[];
 static struct fault_info debug_fault_info[];
 
-static inline const struct fault_info *esr_to_fault_info(unsigned int esr)
+static inline const struct fault_info *esr_to_fault_info(unsigned long esr)
 {
 	return fault_info + (esr & ESR_ELx_FSC);
 }
 
-static inline const struct fault_info *esr_to_debug_fault_info(unsigned int esr)
+static inline const struct fault_info *esr_to_debug_fault_info(unsigned long esr)
 {
 	return debug_fault_info + DBG_ESR_EVT(esr);
 }
 
-static void data_abort_decode(unsigned int esr)
+static void data_abort_decode(unsigned long esr)
 {
 	pr_alert("Data abort info:\n");
 
@@ -85,11 +89,11 @@ static void data_abort_decode(unsigned int esr)
 		 (esr & ESR_ELx_WNR) >> ESR_ELx_WNR_SHIFT);
 }
 
-static void mem_abort_decode(unsigned int esr)
+static void mem_abort_decode(unsigned long esr)
 {
 	pr_alert("Mem abort info:\n");
 
-	pr_alert("  ESR = 0x%08x\n", esr);
+	pr_alert("  ESR = 0x%016lx\n", esr);
 	pr_alert("  EC = 0x%02lx: %s, IL = %u bits\n",
 		 ESR_ELx_EC(esr), esr_get_class_string(esr),
 		 (esr & ESR_ELx_IL) ? 32 : 16);
@@ -99,7 +103,7 @@ static void mem_abort_decode(unsigned int esr)
 	pr_alert("  EA = %lu, S1PTW = %lu\n",
 		 (esr & ESR_ELx_EA) >> ESR_ELx_EA_SHIFT,
 		 (esr & ESR_ELx_S1PTW) >> ESR_ELx_S1PTW_SHIFT);
-	pr_alert("  FSC = 0x%02x: %s\n", (esr & ESR_ELx_FSC),
+	pr_alert("  FSC = 0x%02lx: %s\n", (esr & ESR_ELx_FSC),
 		 esr_to_fault_info(esr)->name);
 
 	if (esr_is_data_abort(esr))
@@ -229,20 +233,20 @@ int ptep_set_access_flags(struct vm_area_struct *vma,
 	return 1;
 }
 
-static bool is_el1_instruction_abort(unsigned int esr)
+static bool is_el1_instruction_abort(unsigned long esr)
 {
 	return ESR_ELx_EC(esr) == ESR_ELx_EC_IABT_CUR;
 }
 
-static bool is_el1_data_abort(unsigned int esr)
+static bool is_el1_data_abort(unsigned long esr)
 {
 	return ESR_ELx_EC(esr) == ESR_ELx_EC_DABT_CUR;
 }
 
-static inline bool is_el1_permission_fault(unsigned long addr, unsigned int esr,
+static inline bool is_el1_permission_fault(unsigned long addr, unsigned long esr,
 					   struct pt_regs *regs)
 {
-	unsigned int fsc_type = esr & ESR_ELx_FSC_TYPE;
+	unsigned long fsc_type = esr & ESR_ELx_FSC_TYPE;
 
 	if (!is_el1_data_abort(esr) && !is_el1_instruction_abort(esr))
 		return false;
@@ -257,8 +261,17 @@ static inline bool is_el1_permission_fault(unsigned long addr, unsigned int esr,
 	return false;
 }
 
+static bool is_pkvm_stage2_abort(unsigned int esr)
+{
+	/*
+	 * S1PTW should only ever be set in ESR_EL1 if the pkvm hypervisor
+	 * injected a stage-2 abort -- see host_inject_abort().
+	 */
+	return is_pkvm_initialized() && (esr & ESR_ELx_S1PTW);
+}
+
 static bool __kprobes is_spurious_el1_translation_fault(unsigned long addr,
-							unsigned int esr,
+							unsigned long esr,
 							struct pt_regs *regs)
 {
 	unsigned long flags;
@@ -266,6 +279,9 @@ static bool __kprobes is_spurious_el1_translation_fault(unsigned long addr,
 
 	if (!is_el1_data_abort(esr) ||
 	    (esr & ESR_ELx_FSC_TYPE) != ESR_ELx_FSC_FAULT)
+		return false;
+
+	if (is_pkvm_stage2_abort(esr))
 		return false;
 
 	local_irq_save(flags);
@@ -290,23 +306,24 @@ static bool __kprobes is_spurious_el1_translation_fault(unsigned long addr,
 }
 
 static void die_kernel_fault(const char *msg, unsigned long addr,
-			     unsigned int esr, struct pt_regs *regs)
+			     unsigned long esr, struct pt_regs *regs)
 {
 	bust_spinlocks(1);
 
 	pr_alert("Unable to handle kernel %s at virtual address %016lx\n", msg,
 		 addr);
 
+	trace_android_rvh_die_kernel_fault(msg, addr, esr, regs);
 	mem_abort_decode(esr);
 
 	show_pte(addr);
 	die("Oops", regs, esr);
 	bust_spinlocks(0);
-	do_exit(SIGKILL);
+	make_task_dead(SIGKILL);
 }
 
 #ifdef CONFIG_KASAN_HW_TAGS
-static void report_tag_fault(unsigned long addr, unsigned int esr,
+static void report_tag_fault(unsigned long addr, unsigned long esr,
 			     struct pt_regs *regs)
 {
 	/*
@@ -318,11 +335,11 @@ static void report_tag_fault(unsigned long addr, unsigned int esr,
 }
 #else
 /* Tag faults aren't enabled without CONFIG_KASAN_HW_TAGS. */
-static inline void report_tag_fault(unsigned long addr, unsigned int esr,
+static inline void report_tag_fault(unsigned long addr, unsigned long esr,
 				    struct pt_regs *regs) { }
 #endif
 
-static void do_tag_recovery(unsigned long addr, unsigned int esr,
+static void do_tag_recovery(unsigned long addr, unsigned long esr,
 			   struct pt_regs *regs)
 {
 
@@ -337,9 +354,9 @@ static void do_tag_recovery(unsigned long addr, unsigned int esr,
 	isb();
 }
 
-static bool is_el1_mte_sync_tag_check_fault(unsigned int esr)
+static bool is_el1_mte_sync_tag_check_fault(unsigned long esr)
 {
-	unsigned int fsc = esr & ESR_ELx_FSC;
+	unsigned long fsc = esr & ESR_ELx_FSC;
 
 	if (!is_el1_data_abort(esr))
 		return false;
@@ -350,7 +367,12 @@ static bool is_el1_mte_sync_tag_check_fault(unsigned int esr)
 	return false;
 }
 
-static void __do_kernel_fault(unsigned long addr, unsigned int esr,
+static bool is_translation_fault(unsigned long esr)
+{
+	return (esr & ESR_ELx_FSC_TYPE) == ESR_ELx_FSC_FAULT;
+}
+
+static void __do_kernel_fault(unsigned long addr, unsigned long esr,
 			      struct pt_regs *regs)
 {
 	const char *msg;
@@ -381,8 +403,11 @@ static void __do_kernel_fault(unsigned long addr, unsigned int esr,
 			msg = "read from unreadable memory";
 	} else if (addr < PAGE_SIZE) {
 		msg = "NULL pointer dereference";
+	} else if (is_pkvm_stage2_abort(esr)) {
+		msg = "access to hypervisor-protected memory";
 	} else {
-		if (kfence_handle_page_fault(addr, esr & ESR_ELx_WNR, regs))
+		if (is_translation_fault(esr) &&
+		    kfence_handle_page_fault(addr, esr & ESR_ELx_WNR, regs))
 			return;
 
 		msg = "paging request";
@@ -391,7 +416,7 @@ static void __do_kernel_fault(unsigned long addr, unsigned int esr,
 	die_kernel_fault(msg, addr, esr, regs);
 }
 
-static void set_thread_esr(unsigned long address, unsigned int esr)
+static void set_thread_esr(unsigned long address, unsigned long esr)
 {
 	current->thread.fault_address = address;
 
@@ -439,7 +464,7 @@ static void set_thread_esr(unsigned long address, unsigned int esr)
 			 * exception level). Fail safe by not providing an ESR
 			 * context record at all.
 			 */
-			WARN(1, "ESR 0x%x is not DABT or IABT from EL0\n", esr);
+			WARN(1, "ESR 0x%lx is not DABT or IABT from EL0\n", esr);
 			esr = 0;
 			break;
 		}
@@ -448,7 +473,7 @@ static void set_thread_esr(unsigned long address, unsigned int esr)
 	current->thread.fault_code = esr;
 }
 
-static void do_bad_area(unsigned long far, unsigned int esr,
+static void do_bad_area(unsigned long far, unsigned long esr,
 			struct pt_regs *regs)
 {
 	unsigned long addr = untagged_addr(far);
@@ -499,7 +524,7 @@ static vm_fault_t __do_page_fault(struct mm_struct *mm, unsigned long addr,
 	return handle_mm_fault(vma, addr, mm_flags, regs);
 }
 
-static bool is_el0_instruction_abort(unsigned int esr)
+static bool is_el0_instruction_abort(unsigned long esr)
 {
 	return ESR_ELx_EC(esr) == ESR_ELx_EC_IABT_LOW;
 }
@@ -508,12 +533,12 @@ static bool is_el0_instruction_abort(unsigned int esr)
  * Note: not valid for EL1 DC IVAC, but we never use that such that it
  * should fault. EL0 cannot issue DC IVAC (undef).
  */
-static bool is_write_abort(unsigned int esr)
+static bool is_write_abort(unsigned long esr)
 {
 	return (esr & ESR_ELx_WNR) && !(esr & ESR_ELx_CM);
 }
 
-static int __kprobes do_page_fault(unsigned long far, unsigned int esr,
+static int __kprobes do_page_fault(unsigned long far, unsigned long esr,
 				   struct pt_regs *regs)
 {
 	const struct fault_info *inf;
@@ -522,6 +547,10 @@ static int __kprobes do_page_fault(unsigned long far, unsigned int esr,
 	unsigned long vm_flags;
 	unsigned int mm_flags = FAULT_FLAG_DEFAULT;
 	unsigned long addr = untagged_addr(far);
+#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
+	struct vm_area_struct *vma;
+	unsigned long seq;
+#endif
 
 	if (kprobe_page_fault(regs, esr))
 		return 0;
@@ -570,7 +599,67 @@ static int __kprobes do_page_fault(unsigned long far, unsigned int esr,
 					 addr, esr, regs);
 	}
 
+	if (is_pkvm_stage2_abort(esr)) {
+		if (!user_mode(regs))
+			goto no_context;
+		arm64_force_sig_fault(SIGSEGV, SEGV_ACCERR, far, "stage-2 fault");
+		return 0;
+	}
+
 	perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS, 1, regs, addr);
+
+#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
+	/*
+	 * No need to try speculative faults for kernel or
+	 * single threaded user space.
+	 */
+	if (!(mm_flags & FAULT_FLAG_USER) || atomic_read(&mm->mm_users) == 1)
+		goto no_spf;
+
+	count_vm_event(SPF_ATTEMPT);
+	seq = mmap_seq_read_start(mm);
+	if (seq & 1) {
+		count_vm_spf_event(SPF_ABORT_ODD);
+		goto spf_abort;
+	}
+	vma = get_vma(mm, addr);
+	if (!vma) {
+		count_vm_spf_event(SPF_ABORT_UNMAPPED);
+		goto spf_abort;
+	}
+	if (!vma_can_speculate(vma, mm_flags)) {
+		put_vma(vma);
+		count_vm_spf_event(SPF_ABORT_NO_SPECULATE);
+		goto spf_abort;
+	}
+
+	if (!mmap_seq_read_check(mm, seq, SPF_ABORT_VMA_COPY)) {
+		put_vma(vma);
+		goto spf_abort;
+	}
+	if (!(vma->vm_flags & vm_flags)) {
+		put_vma(vma);
+		count_vm_spf_event(SPF_ABORT_ACCESS_ERROR);
+		goto spf_abort;
+	}
+	fault = do_handle_mm_fault(vma, addr & PAGE_MASK,
+			mm_flags | FAULT_FLAG_SPECULATIVE, seq, regs);
+	put_vma(vma);
+
+	/* Quick path to respond to signals */
+	if (fault_signal_pending(fault, regs)) {
+		if (!user_mode(regs))
+			goto no_context;
+		return 0;
+	}
+	if (!(fault & VM_FAULT_RETRY))
+		goto done;
+
+spf_abort:
+	count_vm_event(SPF_ABORT);
+no_spf:
+
+#endif	/* CONFIG_SPECULATIVE_PAGE_FAULT */
 
 	/*
 	 * As per x86, we may deadlock here. However, since the kernel only
@@ -612,6 +701,9 @@ retry:
 		}
 	}
 	mmap_read_unlock(mm);
+#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
+done:
+#endif
 
 	/*
 	 * Handle the "normal" (no error) case first.
@@ -671,7 +763,7 @@ no_context:
 }
 
 static int __kprobes do_translation_fault(unsigned long far,
-					  unsigned int esr,
+					  unsigned long esr,
 					  struct pt_regs *regs)
 {
 	unsigned long addr = untagged_addr(far);
@@ -683,19 +775,23 @@ static int __kprobes do_translation_fault(unsigned long far,
 	return 0;
 }
 
-static int do_alignment_fault(unsigned long far, unsigned int esr,
+static int do_alignment_fault(unsigned long far, unsigned long esr,
 			      struct pt_regs *regs)
 {
 	do_bad_area(far, esr, regs);
 	return 0;
 }
 
-static int do_bad(unsigned long far, unsigned int esr, struct pt_regs *regs)
+static int do_bad(unsigned long far, unsigned long esr, struct pt_regs *regs)
 {
-	return 1; /* "fault" */
+	unsigned long addr = untagged_addr(far);
+	int ret = 1;
+
+	trace_android_vh_handle_tlb_conf(addr, esr, &ret);
+	return ret;
 }
 
-static int do_sea(unsigned long far, unsigned int esr, struct pt_regs *regs)
+static int do_sea(unsigned long far, unsigned long esr, struct pt_regs *regs)
 {
 	const struct fault_info *inf;
 	unsigned long siaddr;
@@ -720,12 +816,13 @@ static int do_sea(unsigned long far, unsigned int esr, struct pt_regs *regs)
 		 */
 		siaddr  = untagged_addr(far);
 	}
+	trace_android_rvh_do_sea(siaddr, esr, regs);
 	arm64_notify_die(inf->name, regs, inf->sig, inf->code, siaddr, esr);
 
 	return 0;
 }
 
-static int do_tag_check_fault(unsigned long far, unsigned int esr,
+static int do_tag_check_fault(unsigned long far, unsigned long esr,
 			      struct pt_regs *regs)
 {
 	/*
@@ -805,7 +902,7 @@ static const struct fault_info fault_info[] = {
 	{ do_bad,		SIGKILL, SI_KERNEL,	"unknown 63"			},
 };
 
-void do_mem_abort(unsigned long far, unsigned int esr, struct pt_regs *regs)
+void do_mem_abort(unsigned long far, unsigned long esr, struct pt_regs *regs)
 {
 	const struct fault_info *inf = esr_to_fault_info(esr);
 	unsigned long addr = untagged_addr(far);
@@ -815,6 +912,7 @@ void do_mem_abort(unsigned long far, unsigned int esr, struct pt_regs *regs)
 
 	if (!user_mode(regs)) {
 		pr_alert("Unhandled fault at 0x%016lx\n", addr);
+		trace_android_rvh_do_mem_abort(addr, esr, regs);
 		mem_abort_decode(esr);
 		show_pte(addr);
 	}
@@ -828,14 +926,16 @@ void do_mem_abort(unsigned long far, unsigned int esr, struct pt_regs *regs)
 }
 NOKPROBE_SYMBOL(do_mem_abort);
 
-void do_sp_pc_abort(unsigned long addr, unsigned int esr, struct pt_regs *regs)
+void do_sp_pc_abort(unsigned long addr, unsigned long esr, struct pt_regs *regs)
 {
+	trace_android_rvh_do_sp_pc_abort(addr, esr, regs);
+
 	arm64_notify_die("SP/PC alignment exception", regs, SIGBUS, BUS_ADRALN,
 			 addr, esr);
 }
 NOKPROBE_SYMBOL(do_sp_pc_abort);
 
-int __init early_brk64(unsigned long addr, unsigned int esr,
+int __init early_brk64(unsigned long addr, unsigned long esr,
 		       struct pt_regs *regs);
 
 /*
@@ -855,7 +955,7 @@ static struct fault_info __refdata debug_fault_info[] = {
 };
 
 void __init hook_debug_fault_code(int nr,
-				  int (*fn)(unsigned long, unsigned int, struct pt_regs *),
+				  int (*fn)(unsigned long, unsigned long, struct pt_regs *),
 				  int sig, int code, const char *name)
 {
 	BUG_ON(nr < 0 || nr >= ARRAY_SIZE(debug_fault_info));
@@ -888,7 +988,7 @@ static void debug_exception_exit(struct pt_regs *regs)
 }
 NOKPROBE_SYMBOL(debug_exception_exit);
 
-void do_debug_exception(unsigned long addr_if_watchpoint, unsigned int esr,
+void do_debug_exception(unsigned long addr_if_watchpoint, unsigned long esr,
 			struct pt_regs *regs)
 {
 	const struct fault_info *inf = esr_to_debug_fault_info(esr);
@@ -913,7 +1013,7 @@ NOKPROBE_SYMBOL(do_debug_exception);
 struct page *alloc_zeroed_user_highpage_movable(struct vm_area_struct *vma,
 						unsigned long vaddr)
 {
-	gfp_t flags = GFP_HIGHUSER_MOVABLE | __GFP_ZERO;
+	gfp_t flags = GFP_HIGHUSER_MOVABLE | __GFP_ZERO | __GFP_CMA;
 
 	/*
 	 * If the page is mapped with PROT_MTE, initialise the tags at the
@@ -929,6 +1029,5 @@ struct page *alloc_zeroed_user_highpage_movable(struct vm_area_struct *vma,
 void tag_clear_highpage(struct page *page)
 {
 	mte_zero_clear_page_tags(page_address(page));
-	page_kasan_tag_reset(page);
-	set_bit(PG_mte_tagged, &page->flags);
+	set_page_mte_tagged(page);
 }

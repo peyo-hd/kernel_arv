@@ -56,12 +56,18 @@ $(obj)/uart-ath79.c: $(srctree)/arch/mips/ath79/early_printk.c
 
 vmlinuzobjs-$(CONFIG_KERNEL_XZ) += $(obj)/ashldi3.o
 
+vmlinuzobjs-$(CONFIG_KERNEL_ZSTD) += $(obj)/bswapdi.o $(obj)/ashldi3.o $(obj)/clz_ctz.o
+
 extra-y += ashldi3.c
 $(obj)/ashldi3.c: $(obj)/%.c: $(srctree)/lib/%.c FORCE
 	$(call if_changed,shipped)
 
 extra-y += bswapsi.c
 $(obj)/bswapsi.c: $(obj)/%.c: $(srctree)/arch/mips/lib/%.c FORCE
+	$(call if_changed,shipped)
+
+extra-y += bswapdi.c
+$(obj)/bswapdi.c: $(obj)/%.c: $(srctree)/arch/mips/lib/%.c FORCE
 	$(call if_changed,shipped)
 
 targets := $(notdir $(vmlinuzobjs-y))
@@ -74,12 +80,12 @@ $(obj)/vmlinux.bin: $(KBUILD_IMAGE) FORCE
 	$(call if_changed,objcopy)
 
 tool_$(CONFIG_KERNEL_GZIP)    = gzip
-tool_$(CONFIG_KERNEL_BZIP2)   = bzip2
-tool_$(CONFIG_KERNEL_LZ4)     = lz4
-tool_$(CONFIG_KERNEL_LZMA)    = lzma
-tool_$(CONFIG_KERNEL_LZO)     = lzo
-tool_$(CONFIG_KERNEL_XZ)      = xzkern
-tool_$(CONFIG_KERNEL_ZSTD)    = zstd22
+tool_$(CONFIG_KERNEL_BZIP2)   = bzip2_with_size
+tool_$(CONFIG_KERNEL_LZ4)     = lz4_with_size
+tool_$(CONFIG_KERNEL_LZMA)    = lzma_with_size
+tool_$(CONFIG_KERNEL_LZO)     = lzo_with_size
+tool_$(CONFIG_KERNEL_XZ)      = xzkern_with_size
+tool_$(CONFIG_KERNEL_ZSTD)    = zstd22_with_size
 
 targets += vmlinux.bin.z
 

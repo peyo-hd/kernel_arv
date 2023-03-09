@@ -514,17 +514,17 @@ int elv_register_queue(struct request_queue *q, bool uevent)
 
 void elv_unregister_queue(struct request_queue *q)
 {
+	struct elevator_queue *e = q->elevator;
+
 	lockdep_assert_held(&q->sysfs_lock);
 
-	if (q) {
+	if (e && e->registered) {
 		struct elevator_queue *e = q->elevator;
 
 		kobject_uevent(&e->kobj, KOBJ_REMOVE);
 		kobject_del(&e->kobj);
 
 		e->registered = 0;
-		/* Re-enable throttling in case elevator disabled it */
-		wbt_enable_default(q);
 	}
 }
 
@@ -591,9 +591,7 @@ int elevator_switch_mq(struct request_queue *q,
 	lockdep_assert_held(&q->sysfs_lock);
 
 	if (q->elevator) {
-		if (q->elevator->registered)
-			elv_unregister_queue(q);
-
+		elv_unregister_queue(q);
 		ioc_clear_queue(q);
 		elevator_exit(q, q->elevator);
 	}
@@ -694,12 +692,18 @@ void elevator_init_mq(struct request_queue *q)
 	if (!e)
 		return;
 
+	/*
+	 * We are called before adding disk, when there isn't any FS I/O,
+	 * so freezing queue plus canceling dispatch work is enough to
+	 * drain any dispatch activities originated from passthrough
+	 * requests, then no need to quiesce queue which may add long boot
+	 * latency, especially when lots of disks are involved.
+	 */
 	blk_mq_freeze_queue(q);
-	blk_mq_quiesce_queue(q);
+	blk_mq_cancel_work_sync(q);
 
 	err = blk_mq_init_sched(q, e);
 
-	blk_mq_unquiesce_queue(q);
 	blk_mq_unfreeze_queue(q);
 
 	if (err) {

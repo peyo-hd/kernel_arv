@@ -24,7 +24,7 @@ int mte_save_tags(struct page *page)
 {
 	void *tag_storage, *ret;
 
-	if (!test_bit(PG_mte_tagged, &page->flags))
+	if (!page_mte_tagged(page))
 		return 0;
 
 	tag_storage = mte_allocate_tag_storage();
@@ -53,16 +53,12 @@ bool mte_restore_tags(swp_entry_t entry, struct page *page)
 	if (!tags)
 		return false;
 
-	page_kasan_tag_reset(page);
 	/*
-	 * We need smp_wmb() in between setting the flags and clearing the
-	 * tags because if another thread reads page->flags and builds a
-	 * tagged address out of it, there is an actual dependency to the
-	 * memory access, but on the current thread we do not guarantee that
-	 * the new page->flags are visible before the tags were updated.
+	 * Test PG_mte_tagged again in case it was racing with another
+	 * set_pte_at().
 	 */
-	smp_wmb();
-	mte_restore_page_tags(page_address(page), tags);
+	if (!test_and_set_bit(PG_mte_tagged, &page->flags))
+		mte_restore_page_tags(page_address(page), tags);
 
 	return true;
 }

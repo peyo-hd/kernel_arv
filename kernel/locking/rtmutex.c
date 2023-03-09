@@ -23,6 +23,7 @@
 #include <linux/sched/rt.h>
 #include <linux/sched/wake_q.h>
 #include <linux/ww_mutex.h>
+#include <trace/hooks/dtask.h>
 
 #include "rtmutex_common.h"
 
@@ -855,8 +856,9 @@ static int __sched rt_mutex_adjust_prio_chain(struct task_struct *task,
 		 * then we need to wake the new top waiter up to try
 		 * to get the lock.
 		 */
-		if (prerequeue_top_waiter != rt_mutex_top_waiter(lock))
-			wake_up_state(waiter->task, waiter->wake_state);
+		top_waiter = rt_mutex_top_waiter(lock);
+		if (prerequeue_top_waiter != top_waiter)
+			wake_up_state(top_waiter->task, top_waiter->wake_state);
 		raw_spin_unlock_irq(&lock->wait_lock);
 		return 0;
 	}
@@ -1373,7 +1375,7 @@ static bool rtmutex_spin_on_owner(struct rt_mutex_base *lock,
 		 *  - the VCPU on which owner runs is preempted
 		 */
 		if (!owner->on_cpu || need_resched() ||
-		    rt_mutex_waiter_is_top_waiter(lock, waiter) ||
+		    !rt_mutex_waiter_is_top_waiter(lock, waiter) ||
 		    vcpu_is_preempted(task_cpu(owner))) {
 			res = false;
 			break;
@@ -1479,6 +1481,7 @@ static int __sched rt_mutex_slowlock_block(struct rt_mutex_base *lock,
 	struct task_struct *owner;
 	int ret = 0;
 
+	trace_android_vh_rtmutex_wait_start(lock);
 	for (;;) {
 		/* Try to acquire the lock: */
 		if (try_to_take_rt_mutex(lock, current, waiter))
@@ -1512,6 +1515,7 @@ static int __sched rt_mutex_slowlock_block(struct rt_mutex_base *lock,
 		set_current_state(state);
 	}
 
+	trace_android_vh_rtmutex_wait_finish(lock);
 	__set_current_state(TASK_RUNNING);
 	return ret;
 }

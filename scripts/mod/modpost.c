@@ -28,6 +28,8 @@ static int modversions = 0;
 static int all_versions = 0;
 /* If we are modposting external module set to 1 */
 static int external_module = 0;
+#define MODULE_SCMVERSION_SIZE 64
+static char module_scmversion[MODULE_SCMVERSION_SIZE];
 /* Only warn about unresolved symbols */
 static int warn_unresolved = 0;
 /* How a symbol is exported */
@@ -418,10 +420,9 @@ static struct symbol *sym_add_exported(const char *name, struct module *mod,
 		s = new_symbol(name, mod, export);
 	} else if (!external_module || s->module->is_vmlinux ||
 		   s->module == mod) {
-		warn("%s: '%s' exported twice. Previous export was in %s%s\n",
-		     mod->name, name, s->module->name,
-		     s->module->is_vmlinux ? "" : ".ko");
-		return s;
+		fatal("%s: '%s' exported twice. Previous export was in %s%s\n",
+		      mod->name, name, s->module->name,
+		      s->module->is_vmlinux ? "" : ".ko");
 	}
 
 	s->module = mod;
@@ -669,7 +670,7 @@ static void handle_modversion(const struct module *mod,
 	unsigned int crc;
 
 	if (sym->st_shndx == SHN_UNDEF) {
-		warn("EXPORT symbol \"%s\" [%s%s] version ...\n"
+		warn("EXPORT symbol \"%s\" [%s%s] version generation failed, symbol will not be versioned.\n"
 		     "Is \"%s\" prototyped in <asm/asm-prototypes.h>?\n",
 		     symname, mod->name, mod->is_vmlinux ? "" : ".ko",
 		     symname);
@@ -901,6 +902,7 @@ static void check_section(const char *modname, struct elf_info *elf,
 	const char *sec = sech_name(elf, sechdr);
 
 	if (sechdr->sh_type == SHT_PROGBITS &&
+	    sechdr->sh_size > 0 &&
 	    !(sechdr->sh_flags & SHF_ALLOC) &&
 	    !match(sec, section_white_list)) {
 		warn("%s (%s): unexpected non-allocatable section.\n"
@@ -1108,7 +1110,7 @@ static const struct sectioncheck sectioncheck[] = {
 },
 /* Do not export init/exit functions or data */
 {
-	.fromsec = { "__ksymtab*", NULL },
+	.fromsec = { "___ksymtab*", NULL },
 	.bad_tosec = { INIT_SECTIONS, EXIT_SECTIONS, NULL },
 	.mismatch = EXPORT_TO_INIT_EXIT,
 	.symbol_white_list = { DEFAULT_SYMBOL_WHITE_LIST, NULL },
@@ -1260,7 +1262,8 @@ static int secref_whitelist(const struct sectioncheck *mismatch,
 
 static inline int is_arm_mapping_symbol(const char *str)
 {
-	return str[0] == '$' && strchr("axtd", str[1])
+	return str[0] == '$' &&
+	       (str[1] == 'a' || str[1] == 'd' || str[1] == 't' || str[1] == 'x')
 	       && (str[2] == '\0' || str[2] == '.');
 }
 
@@ -1971,7 +1974,7 @@ static char *remove_dot(char *s)
 
 	if (n && s[n]) {
 		size_t m = strspn(s + n + 1, "0123456789");
-		if (m && (s[n + m] == '.' || s[n + m] == 0))
+		if (m && (s[n + m + 1] == '.' || s[n + m + 1] == 0))
 			s[n] = 0;
 
 		/* strip trailing .lto */
@@ -2232,6 +2235,20 @@ static void add_intree_flag(struct buffer *b, int is_intree)
 {
 	if (is_intree)
 		buf_printf(b, "\nMODULE_INFO(intree, \"Y\");\n");
+}
+
+/**
+ * add_scmversion() - Adds the MODULE_INFO macro for the scmversion.
+ * @b: Buffer to append to.
+ *
+ * This function fills in the module attribute `scmversion` for the kernel
+ * module. This is useful for determining a given module's SCM version on
+ * device via /sys/modules/<module>/scmversion and/or using the modinfo tool.
+ */
+static void add_scmversion(struct buffer *b)
+{
+	if (module_scmversion[0] != '\0')
+		buf_printf(b, "\nMODULE_INFO(scmversion, \"%s\");\n", module_scmversion);
 }
 
 /* Cannot check for assembler */
@@ -2503,7 +2520,7 @@ int main(int argc, char **argv)
 	struct dump_list *dump_read_start = NULL;
 	struct dump_list **dump_read_iter = &dump_read_start;
 
-	while ((opt = getopt(argc, argv, "ei:mnT:o:awENd:")) != -1) {
+	while ((opt = getopt(argc, argv, "ei:mnT:o:awENd:v:")) != -1) {
 		switch (opt) {
 		case 'e':
 			external_module = 1;
@@ -2540,6 +2557,9 @@ int main(int argc, char **argv)
 			break;
 		case 'd':
 			missing_namespace_deps = optarg;
+			break;
+		case 'v':
+			strncpy(module_scmversion, optarg, sizeof(module_scmversion) - 1);
 			break;
 		default:
 			exit(1);
@@ -2580,6 +2600,7 @@ int main(int argc, char **argv)
 		add_depends(&buf, mod);
 		add_moddevtable(&buf, mod);
 		add_srcversion(&buf, mod);
+		add_scmversion(&buf);
 
 		sprintf(fname, "%s.mod.c", mod->name);
 		write_if_changed(&buf, fname);

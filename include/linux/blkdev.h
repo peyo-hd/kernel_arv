@@ -24,6 +24,8 @@
 #include <linux/blkzoned.h>
 #include <linux/pm.h>
 #include <linux/sbitmap.h>
+#include <linux/android_kabi.h>
+#include <linux/android_vendor.h>
 
 struct module;
 struct request_queue;
@@ -37,7 +39,7 @@ struct pr_ops;
 struct rq_qos;
 struct blk_queue_stats;
 struct blk_stat_callback;
-struct blk_keyslot_manager;
+struct blk_crypto_profile;
 
 #define BLKDEV_MIN_RQ	4
 #define BLKDEV_MAX_RQ	128	/* Default maximum */
@@ -211,7 +213,7 @@ struct request {
 
 #ifdef CONFIG_BLK_INLINE_ENCRYPTION
 	struct bio_crypt_ctx *crypt_ctx;
-	struct blk_ksm_keyslot *crypt_keyslot;
+	struct blk_crypto_keyslot *crypt_keyslot;
 #endif
 
 	unsigned short write_hint;
@@ -233,7 +235,17 @@ struct request {
 	 */
 	rq_end_io_fn *end_io;
 	void *end_io_data;
+
+	ANDROID_KABI_RESERVE(1);
 };
+
+static inline int blk_validate_block_size(unsigned int bsize)
+{
+	if (bsize < 512 || bsize > PAGE_SIZE || !is_power_of_2(bsize))
+		return -EINVAL;
+
+	return 0;
+}
 
 static inline bool blk_op_is_passthrough(unsigned int op)
 {
@@ -252,8 +264,6 @@ static inline unsigned short req_get_ioprio(struct request *req)
 }
 
 #include <linux/elevator.h>
-
-struct blk_queue_ctx;
 
 struct bio_vec;
 
@@ -323,6 +333,10 @@ struct queue_limits {
 	unsigned char		discard_misaligned;
 	unsigned char		raid_partial_stripes_expensive;
 	enum blk_zoned_model	zoned;
+
+	ANDROID_KABI_RESERVE(1);
+
+	ANDROID_OEM_DATA(1);
 };
 
 typedef int (*report_zones_cb)(struct blk_zone *zone, unsigned int idx,
@@ -444,8 +458,8 @@ struct request_queue {
 	unsigned int		dma_alignment;
 
 #ifdef CONFIG_BLK_INLINE_ENCRYPTION
-	/* Inline crypto capabilities */
-	struct blk_keyslot_manager *ksm;
+	struct blk_crypto_profile *crypto_profile;
+	struct kobject *crypto_kobject;
 #endif
 
 	unsigned int		rq_timeout;
@@ -553,6 +567,13 @@ struct request_queue {
 
 #define BLK_MAX_WRITE_HINTS	5
 	u64			write_hints[BLK_MAX_WRITE_HINTS];
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
+
+	ANDROID_OEM_DATA(1);
 };
 
 /* Keep blk_queue_flag_name[] in sync with the definitions below */
@@ -586,6 +607,8 @@ struct request_queue {
 #define QUEUE_FLAG_RQ_ALLOC_TIME 27	/* record rq->alloc_time_ns */
 #define QUEUE_FLAG_HCTX_ACTIVE	28	/* at least one blk-mq hctx is active */
 #define QUEUE_FLAG_NOWAIT       29	/* device supports NOWAIT */
+/* Pipeline zoned writes (REQ_OP_WRITE, REQ_OP_WRITE_ZEROES). */
+#define QUEUE_FLAG_PIPELINE_ZONED_WRITES 30
 
 #define QUEUE_FLAG_MQ_DEFAULT	((1 << QUEUE_FLAG_IO_STAT) |		\
 				 (1 << QUEUE_FLAG_SAME_COMP) |		\
@@ -632,6 +655,11 @@ bool blk_queue_flag_test_and_set(unsigned int flag, struct request_queue *q);
 #define blk_queue_fua(q)	test_bit(QUEUE_FLAG_FUA, &(q)->queue_flags)
 #define blk_queue_registered(q)	test_bit(QUEUE_FLAG_REGISTERED, &(q)->queue_flags)
 #define blk_queue_nowait(q)	test_bit(QUEUE_FLAG_NOWAIT, &(q)->queue_flags)
+
+static inline bool blk_queue_pipeline_zoned_writes(struct request_queue *q)
+{
+	return test_bit(QUEUE_FLAG_PIPELINE_ZONED_WRITES, &q->queue_flags);
+}
 
 extern void blk_set_pm_only(struct request_queue *q);
 extern void blk_clear_pm_only(struct request_queue *q);
@@ -697,11 +725,26 @@ static inline unsigned int blk_queue_nr_zones(struct request_queue *q)
 static inline unsigned int blk_queue_zone_no(struct request_queue *q,
 					     sector_t sector)
 {
+	sector_t zone_sectors = q->limits.chunk_sectors;
+
 	if (!blk_queue_is_zoned(q))
 		return 0;
-	return sector >> ilog2(q->limits.chunk_sectors);
+
+	if (is_power_of_2(zone_sectors))
+		return sector >> ilog2(zone_sectors);
+
+	return div64_u64(sector, zone_sectors);
 }
 
+/**
+ * blk_queue_zone_is_seq() - Whether a logical block is in a sequential zone.
+ * @q: Request queue pointer.
+ * @sector: Offset from start of block device in 512 byte units.
+ *
+ * Return: true if and only if @q refers to a zoned block device and
+ * @sector refers either to a sequential write required or a sequential
+ * write preferred zone.
+ */
 static inline bool blk_queue_zone_is_seq(struct request_queue *q,
 					 sector_t sector)
 {
@@ -979,9 +1022,40 @@ static inline unsigned int blk_rq_zone_no(struct request *rq)
 	return blk_queue_zone_no(rq->q, blk_rq_pos(rq));
 }
 
+/**
+ * blk_rq_zone_is_seq() - Whether a request is for a sequential zone.
+ * @rq: Request pointer.
+ *
+ * Return: true if and only if blk_rq_pos(@rq) refers either to a sequential
+ * write required or a sequential write preferred zone.
+ */
 static inline unsigned int blk_rq_zone_is_seq(struct request *rq)
 {
 	return blk_queue_zone_is_seq(rq->q, blk_rq_pos(rq));
+}
+
+/**
+ * blk_rq_is_seq_zone_write() - Whether @rq is a write request for a sequential zone.
+ * @rq: Request to examine.
+ *
+ * In this context sequential zone means either a sequential write required or
+ * to a sequential write preferred zone.
+ */
+static inline bool blk_rq_is_seq_zone_write(struct request *rq)
+{
+	switch (req_op(rq)) {
+	case REQ_OP_WRITE_ZEROES:
+	case REQ_OP_WRITE_SAME:
+	case REQ_OP_WRITE:
+		return blk_rq_zone_is_seq(rq);
+	default:
+		return false;
+	}
+}
+#else /* CONFIG_BLK_DEV_ZONED */
+static inline bool blk_rq_is_seq_zone_write(struct request *rq)
+{
+	return false;
 }
 #endif /* CONFIG_BLK_DEV_ZONED */
 
@@ -1176,7 +1250,8 @@ extern void blk_dump_rq_flags(struct request *, char *);
 
 bool __must_check blk_get_queue(struct request_queue *);
 extern void blk_put_queue(struct request_queue *);
-extern void blk_set_queue_dying(struct request_queue *);
+
+void blk_mark_disk_dead(struct gendisk *disk);
 
 #ifdef CONFIG_BLOCK
 /*
@@ -1198,8 +1273,6 @@ struct blk_plug {
 	bool multiple_queues;
 	bool nowait;
 };
-#define BLK_MAX_REQUEST_COUNT 16
-#define BLK_PLUG_FLUSH_SIZE (128 * 1024)
 
 struct blk_plug_cb;
 typedef void (*blk_plug_cb_fn)(struct blk_plug_cb *, bool);
@@ -1382,6 +1455,17 @@ static inline unsigned int queue_max_zone_append_sectors(const struct request_qu
 	return min(l->max_zone_append_sectors, l->max_sectors);
 }
 
+static inline unsigned int
+bdev_max_zone_append_sectors(struct block_device *bdev)
+{
+	return queue_max_zone_append_sectors(bdev_get_queue(bdev));
+}
+
+static inline unsigned int bdev_max_segments(struct block_device *bdev)
+{
+	return queue_max_segments(bdev_get_queue(bdev));
+}
+
 static inline unsigned queue_logical_block_size(const struct request_queue *q)
 {
 	int retval = 512;
@@ -1557,12 +1641,12 @@ static inline enum blk_zoned_model bdev_zoned_model(struct block_device *bdev)
 
 static inline bool bdev_is_zoned(struct block_device *bdev)
 {
-	struct request_queue *q = bdev_get_queue(bdev);
+	return blk_queue_is_zoned(bdev_get_queue(bdev));
+}
 
-	if (q)
-		return blk_queue_is_zoned(q);
-
-	return false;
+static inline unsigned int bdev_zone_no(struct block_device *bdev, sector_t sec)
+{
+	return blk_queue_zone_no(bdev->bd_disk->queue, sec);
 }
 
 static inline sector_t bdev_zone_sectors(struct block_device *bdev)
@@ -1590,6 +1674,31 @@ static inline unsigned int bdev_max_active_zones(struct block_device *bdev)
 	if (q)
 		return queue_max_active_zones(q);
 	return 0;
+}
+
+static inline sector_t bdev_offset_from_zone_start(struct block_device *bdev,
+						   sector_t sector)
+{
+	sector_t zone_sectors = bdev_zone_sectors(bdev);
+	u64 remainder = 0;
+
+	if (!bdev_is_zoned(bdev))
+		return 0;
+
+	if (is_power_of_2(zone_sectors))
+		return sector & (zone_sectors - 1);
+
+	div64_u64_rem(sector, zone_sectors, &remainder);
+	return remainder;
+}
+
+static inline bool bdev_is_zone_start(struct block_device *bdev,
+				      sector_t sector)
+{
+	if (!bdev_is_zoned(bdev))
+		return false;
+
+	return bdev_offset_from_zone_start(bdev, sector) == 0;
 }
 
 static inline int queue_dma_alignment(const struct request_queue *q)
@@ -1813,19 +1922,16 @@ static inline struct bio_vec *rq_integrity_vec(struct request *rq)
 
 #ifdef CONFIG_BLK_INLINE_ENCRYPTION
 
-bool blk_ksm_register(struct blk_keyslot_manager *ksm, struct request_queue *q);
-
-void blk_ksm_unregister(struct request_queue *q);
+bool blk_crypto_register(struct blk_crypto_profile *profile,
+			 struct request_queue *q);
 
 #else /* CONFIG_BLK_INLINE_ENCRYPTION */
 
-static inline bool blk_ksm_register(struct blk_keyslot_manager *ksm,
-				    struct request_queue *q)
+static inline bool blk_crypto_register(struct blk_crypto_profile *profile,
+				       struct request_queue *q)
 {
 	return true;
 }
-
-static inline void blk_ksm_unregister(struct request_queue *q) { }
 
 #endif /* CONFIG_BLK_INLINE_ENCRYPTION */
 
@@ -1856,6 +1962,10 @@ struct block_device_operations {
 	 * driver.
 	 */
 	int (*alternative_gpt_sector)(struct gendisk *disk, sector_t *sector);
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_OEM_DATA(1);
 };
 
 #ifdef CONFIG_COMPAT
@@ -1941,6 +2051,7 @@ unsigned long disk_start_io_acct(struct gendisk *disk, unsigned int sectors,
 void disk_end_io_acct(struct gendisk *disk, unsigned int op,
 		unsigned long start_time);
 
+void bio_start_io_acct_time(struct bio *bio, unsigned long start_time);
 unsigned long bio_start_io_acct(struct bio *bio);
 void bio_end_io_acct_remapped(struct bio *bio, unsigned long start_time,
 		struct block_device *orig_bdev);
@@ -1991,6 +2102,8 @@ int truncate_bdev_range(struct block_device *bdev, fmode_t mode, loff_t lstart,
 #ifdef CONFIG_BLOCK
 void invalidate_bdev(struct block_device *bdev);
 int sync_blockdev(struct block_device *bdev);
+int sync_blockdev_nowait(struct block_device *bdev);
+void sync_bdevs(bool wait);
 #else
 static inline void invalidate_bdev(struct block_device *bdev)
 {
@@ -1998,6 +2111,13 @@ static inline void invalidate_bdev(struct block_device *bdev)
 static inline int sync_blockdev(struct block_device *bdev)
 {
 	return 0;
+}
+static inline int sync_blockdev_nowait(struct block_device *bdev)
+{
+	return 0;
+}
+static inline void sync_bdevs(bool wait)
+{
 }
 #endif
 int fsync_bdev(struct block_device *bdev);

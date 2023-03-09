@@ -268,7 +268,6 @@ static u32 iwl_mvm_get_tx_rate(struct iwl_mvm *mvm,
 	int rate_idx = -1;
 	u8 rate_plcp;
 	u32 rate_flags = 0;
-	struct iwl_mvm_sta *mvmsta = iwl_mvm_sta_from_mac80211(sta);
 
 	/* info->control is only relevant for non HW rate control */
 	if (!ieee80211_hw_check(mvm->hw, HAS_RATE_CONTROL)) {
@@ -278,7 +277,8 @@ static u32 iwl_mvm_get_tx_rate(struct iwl_mvm *mvm,
 			  "Got a HT rate (flags:0x%x/mcs:%d/fc:0x%x/state:%d) for a non data frame\n",
 			  info->control.rates[0].flags,
 			  info->control.rates[0].idx,
-			  le16_to_cpu(fc), mvmsta->sta_state);
+			  le16_to_cpu(fc),
+			  sta ? iwl_mvm_sta_from_mac80211(sta)->sta_state : -1);
 
 		rate_idx = info->control.rates[0].idx;
 	}
@@ -743,7 +743,7 @@ unsigned int iwl_mvm_max_amsdu_size(struct iwl_mvm *mvm,
 	int lmac = iwl_mvm_get_lmac_id(mvm->fw, band);
 
 	/* For HE redirect to trigger based fifos */
-	if (sta->he_cap.has_he && !WARN_ON(!iwl_mvm_has_new_tx_api(mvm)))
+	if (sta->deflink.he_cap.has_he && !WARN_ON(!iwl_mvm_has_new_tx_api(mvm)))
 		ac += 4;
 
 	txf = iwl_mvm_mac_ac_to_tx_fifo(mvm, ac);
@@ -884,7 +884,7 @@ static int iwl_mvm_tx_tso(struct iwl_mvm *mvm, struct sk_buff *skb,
 	 * section 8.7.3 NOTE 3).
 	 */
 	if (info->flags & IEEE80211_TX_CTL_AMPDU &&
-	    !sta->vht_cap.vht_supported)
+	    !sta->deflink.vht_cap.vht_supported)
 		max_amsdu_len = min_t(unsigned int, max_amsdu_len, 4095);
 
 	/* Sub frame header + SNAP + IP header + TCP header + MSS */
@@ -1032,7 +1032,7 @@ static int iwl_mvm_tx_mpdu(struct iwl_mvm *mvm, struct sk_buff *skb,
 	if (WARN_ON_ONCE(mvmsta->sta_id == IWL_MVM_INVALID_STA))
 		return -1;
 
-	if (unlikely(ieee80211_is_any_nullfunc(fc)) && sta->he_cap.has_he)
+	if (unlikely(ieee80211_is_any_nullfunc(fc)) && sta->deflink.he_cap.has_he)
 		return -1;
 
 	if (unlikely(ieee80211_is_probe_resp(fc)))
@@ -1150,6 +1150,7 @@ int iwl_mvm_tx_skb_sta(struct iwl_mvm *mvm, struct sk_buff *skb,
 	struct sk_buff_head mpdus_skbs;
 	unsigned int payload_len;
 	int ret;
+	struct sk_buff *orig_skb = skb;
 
 	if (WARN_ON_ONCE(!mvmsta))
 		return -1;
@@ -1182,8 +1183,17 @@ int iwl_mvm_tx_skb_sta(struct iwl_mvm *mvm, struct sk_buff *skb,
 
 		ret = iwl_mvm_tx_mpdu(mvm, skb, &info, sta);
 		if (ret) {
+			/* Free skbs created as part of TSO logic that have not yet been dequeued */
 			__skb_queue_purge(&mpdus_skbs);
-			return ret;
+			/* skb here is not necessarily same as skb that entered this method,
+			 * so free it explicitly.
+			 */
+			if (skb == orig_skb)
+				ieee80211_free_txskb(mvm->hw, skb);
+			else
+				kfree_skb(skb);
+			/* there was error, but we consumed skb one way or another, so return 0 */
+			return 0;
 		}
 	}
 

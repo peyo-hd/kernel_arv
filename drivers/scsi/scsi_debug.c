@@ -16,7 +16,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ":%s: " fmt, __func__
 
 #include <linux/module.h>
-
+#include <linux/align.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/jiffies.h>
@@ -98,6 +98,7 @@ static const char *sdebug_version_date = "20200710";
 #define WRITE_BOUNDARY_ASCQ 0x5
 #define READ_INVDATA_ASCQ 0x6
 #define READ_BOUNDARY_ASCQ 0x7
+#define ATTEMPT_ACCESS_GAP 0x9
 #define INSUFF_ZONE_ASCQ 0xe
 
 /* Additional Sense Code Qualifier (ASCQ) */
@@ -250,9 +251,11 @@ static const char *sdebug_version_date = "20200710";
 
 /* Zone types (zbcr05 table 25) */
 enum sdebug_z_type {
-	ZBC_ZONE_TYPE_CNV	= 0x1,
-	ZBC_ZONE_TYPE_SWR	= 0x2,
-	ZBC_ZONE_TYPE_SWP	= 0x3,
+	ZBC_ZTYPE_CNV	= 0x1,
+	ZBC_ZTYPE_SWR	= 0x2,
+	ZBC_ZTYPE_SWP	= 0x3,
+	/* ZBC_ZTYPE_SOBR = 0x4, */
+	ZBC_ZTYPE_GAP	= 0x5,
 };
 
 /* enumeration names taken from table 26, zbcr05 */
@@ -290,10 +293,11 @@ struct sdebug_dev_info {
 
 	/* For ZBC devices */
 	enum blk_zoned_model zmodel;
+	unsigned int zcap;
 	unsigned int zsize;
-	unsigned int zsize_shift;
 	unsigned int nr_zones;
 	unsigned int nr_conv_zones;
+	unsigned int nr_seq_zones;
 	unsigned int nr_imp_open;
 	unsigned int nr_exp_open;
 	unsigned int nr_closed;
@@ -827,6 +831,7 @@ static int dif_errors;
 
 /* ZBC global data */
 static bool sdeb_zbc_in_use;	/* true for host-aware and host-managed disks */
+static int sdeb_zbc_zone_cap_mb;
 static int sdeb_zbc_zone_size_mb;
 static int sdeb_zbc_max_open = DEF_ZBC_MAX_OPEN_ZONES;
 static int sdeb_zbc_nr_conv = DEF_ZBC_NR_CONV_ZONES;
@@ -1189,7 +1194,7 @@ static int p_fill_from_dev_buffer(struct scsi_cmnd *scp, const void *arr,
 		 __func__, off_dst, scsi_bufflen(scp), act_len,
 		 scsi_get_resid(scp));
 	n = scsi_bufflen(scp) - (off_dst + act_len);
-	scsi_set_resid(scp, min_t(int, scsi_get_resid(scp), n));
+	scsi_set_resid(scp, min_t(u32, scsi_get_resid(scp), n));
 	return 0;
 }
 
@@ -1551,6 +1556,12 @@ static int inquiry_vpd_b6(struct sdebug_dev_info *devip, unsigned char *arr)
 		put_unaligned_be32(devip->max_open, &arr[12]);
 	else
 		put_unaligned_be32(0xffffffff, &arr[12]);
+	if (devip->zcap < devip->zsize) {
+		arr[19] = ZBC_CONSTANT_ZONE_START_OFFSET;
+		put_unaligned_be64(devip->zsize, &arr[20]);
+	} else {
+		arr[19] = 0;
+	}
 	return 0x3c;
 }
 
@@ -1562,7 +1573,8 @@ static int resp_inquiry(struct scsi_cmnd *scp, struct sdebug_dev_info *devip)
 	unsigned char pq_pdt;
 	unsigned char *arr;
 	unsigned char *cmd = scp->cmnd;
-	int alloc_len, n, ret;
+	u32 alloc_len, n;
+	int ret;
 	bool have_wlun, is_disk, is_zbc, is_disk_zbc;
 
 	alloc_len = get_unaligned_be16(cmd + 3);
@@ -1585,7 +1597,8 @@ static int resp_inquiry(struct scsi_cmnd *scp, struct sdebug_dev_info *devip)
 		kfree(arr);
 		return check_condition_result;
 	} else if (0x1 & cmd[1]) {  /* EVPD bit set */
-		int lu_id_num, port_group_id, target_dev_id, len;
+		int lu_id_num, port_group_id, target_dev_id;
+		u32 len;
 		char lu_id_str[6];
 		int host_no = devip->sdbg_host->shost->host_no;
 		
@@ -1676,9 +1689,9 @@ static int resp_inquiry(struct scsi_cmnd *scp, struct sdebug_dev_info *devip)
 			kfree(arr);
 			return check_condition_result;
 		}
-		len = min(get_unaligned_be16(arr + 2) + 4, alloc_len);
+		len = min_t(u32, get_unaligned_be16(arr + 2) + 4, alloc_len);
 		ret = fill_from_dev_buffer(scp, arr,
-			    min(len, SDEBUG_MAX_INQ_ARR_SZ));
+			    min_t(u32, len, SDEBUG_MAX_INQ_ARR_SZ));
 		kfree(arr);
 		return ret;
 	}
@@ -1714,7 +1727,7 @@ static int resp_inquiry(struct scsi_cmnd *scp, struct sdebug_dev_info *devip)
 	}
 	put_unaligned_be16(0x2100, arr + n);	/* SPL-4 no version claimed */
 	ret = fill_from_dev_buffer(scp, arr,
-			    min_t(int, alloc_len, SDEBUG_LONG_INQ_SZ));
+			    min_t(u32, alloc_len, SDEBUG_LONG_INQ_SZ));
 	kfree(arr);
 	return ret;
 }
@@ -1729,8 +1742,8 @@ static int resp_requests(struct scsi_cmnd *scp,
 	unsigned char *cmd = scp->cmnd;
 	unsigned char arr[SCSI_SENSE_BUFFERSIZE];	/* assume >= 18 bytes */
 	bool dsense = !!(cmd[1] & 1);
-	int alloc_len = cmd[4];
-	int len = 18;
+	u32 alloc_len = cmd[4];
+	u32 len = 18;
 	int stopped_state = atomic_read(&devip->stopped);
 
 	memset(arr, 0, sizeof(arr));
@@ -1774,7 +1787,7 @@ static int resp_requests(struct scsi_cmnd *scp,
 			arr[7] = 0xa;
 		}
 	}
-	return fill_from_dev_buffer(scp, arr, min_t(int, len, alloc_len));
+	return fill_from_dev_buffer(scp, arr, min_t(u32, len, alloc_len));
 }
 
 static int resp_start_stop(struct scsi_cmnd *scp, struct sdebug_dev_info *devip)
@@ -1856,7 +1869,7 @@ static int resp_readcap16(struct scsi_cmnd *scp,
 {
 	unsigned char *cmd = scp->cmnd;
 	unsigned char arr[SDEBUG_READCAP16_ARR_SZ];
-	int alloc_len;
+	u32 alloc_len;
 
 	alloc_len = get_unaligned_be32(cmd + 10);
 	/* following just in case virtual_gb changed */
@@ -1877,6 +1890,13 @@ static int resp_readcap16(struct scsi_cmnd *scp,
 			arr[14] |= 0x40;
 	}
 
+	/*
+	 * Since the scsi_debug READ CAPACITY implementation always reports the
+	 * total disk capacity, set RC BASIS = 1 for host-managed ZBC devices.
+	 */
+	if (devip->zmodel == BLK_ZONED_HM)
+		arr[12] |= 1 << 4;
+
 	arr[15] = sdebug_lowest_aligned & 0xff;
 
 	if (have_dif_prot) {
@@ -1885,7 +1905,7 @@ static int resp_readcap16(struct scsi_cmnd *scp,
 	}
 
 	return fill_from_dev_buffer(scp, arr,
-			    min_t(int, alloc_len, SDEBUG_READCAP16_ARR_SZ));
+			    min_t(u32, alloc_len, SDEBUG_READCAP16_ARR_SZ));
 }
 
 #define SDEBUG_MAX_TGTPGS_ARR_SZ 1412
@@ -1896,8 +1916,9 @@ static int resp_report_tgtpgs(struct scsi_cmnd *scp,
 	unsigned char *cmd = scp->cmnd;
 	unsigned char *arr;
 	int host_no = devip->sdbg_host->shost->host_no;
-	int n, ret, alen, rlen;
 	int port_group_a, port_group_b, port_a, port_b;
+	u32 alen, n, rlen;
+	int ret;
 
 	alen = get_unaligned_be32(cmd + 6);
 	arr = kzalloc(SDEBUG_MAX_TGTPGS_ARR_SZ, GFP_ATOMIC);
@@ -1959,9 +1980,9 @@ static int resp_report_tgtpgs(struct scsi_cmnd *scp,
 	 * - The constructed command length
 	 * - The maximum array size
 	 */
-	rlen = min_t(int, alen, n);
+	rlen = min(alen, n);
 	ret = fill_from_dev_buffer(scp, arr,
-			   min_t(int, rlen, SDEBUG_MAX_TGTPGS_ARR_SZ));
+			   min_t(u32, rlen, SDEBUG_MAX_TGTPGS_ARR_SZ));
 	kfree(arr);
 	return ret;
 }
@@ -2311,7 +2332,8 @@ static int resp_mode_sense(struct scsi_cmnd *scp,
 {
 	int pcontrol, pcode, subpcode, bd_len;
 	unsigned char dev_spec;
-	int alloc_len, offset, len, target_dev_id;
+	u32 alloc_len, offset, len;
+	int target_dev_id;
 	int target = scp->device->id;
 	unsigned char *ap;
 	unsigned char arr[SDEBUG_MAX_MSENSE_SZ];
@@ -2467,7 +2489,7 @@ static int resp_mode_sense(struct scsi_cmnd *scp,
 		arr[0] = offset - 1;
 	else
 		put_unaligned_be16((offset - 2), arr + 0);
-	return fill_from_dev_buffer(scp, arr, min_t(int, alloc_len, offset));
+	return fill_from_dev_buffer(scp, arr, min_t(u32, alloc_len, offset));
 }
 
 #define SDEBUG_MAX_MSELECT_SZ 512
@@ -2498,11 +2520,11 @@ static int resp_mode_select(struct scsi_cmnd *scp,
 			    __func__, param_len, res);
 	md_len = mselect6 ? (arr[0] + 1) : (get_unaligned_be16(arr + 0) + 2);
 	bd_len = mselect6 ? arr[3] : get_unaligned_be16(arr + 6);
-	if (md_len > 2) {
+	off = bd_len + (mselect6 ? 4 : 8);
+	if (md_len > 2 || off >= res) {
 		mk_sense_invalid_fld(scp, SDEB_IN_DATA, 0, -1);
 		return check_condition_result;
 	}
-	off = bd_len + (mselect6 ? 4 : 8);
 	mpage = arr[off] & 0x3f;
 	ps = !!(arr[off] & 0x80);
 	if (ps) {
@@ -2582,7 +2604,8 @@ static int resp_ie_l_pg(unsigned char *arr)
 static int resp_log_sense(struct scsi_cmnd *scp,
 			  struct sdebug_dev_info *devip)
 {
-	int ppc, sp, pcode, subpcode, alloc_len, len, n;
+	int ppc, sp, pcode, subpcode;
+	u32 alloc_len, len, n;
 	unsigned char arr[SDEBUG_MAX_LSENSE_SZ];
 	unsigned char *cmd = scp->cmnd;
 
@@ -2652,9 +2675,9 @@ static int resp_log_sense(struct scsi_cmnd *scp,
 		mk_sense_invalid_fld(scp, SDEB_IN_CDB, 3, -1);
 		return check_condition_result;
 	}
-	len = min_t(int, get_unaligned_be16(arr + 2) + 4, alloc_len);
+	len = min_t(u32, get_unaligned_be16(arr + 2) + 4, alloc_len);
 	return fill_from_dev_buffer(scp, arr,
-		    min_t(int, len, SDEBUG_MAX_INQ_ARR_SZ));
+		    min_t(u32, len, SDEBUG_MAX_INQ_ARR_SZ));
 }
 
 static inline bool sdebug_dev_is_zoned(struct sdebug_dev_info *devip)
@@ -2665,12 +2688,38 @@ static inline bool sdebug_dev_is_zoned(struct sdebug_dev_info *devip)
 static struct sdeb_zone_state *zbc_zone(struct sdebug_dev_info *devip,
 					unsigned long long lba)
 {
-	return &devip->zstate[lba >> devip->zsize_shift];
+	u32 zno = div_u64(lba, devip->zsize);
+	struct sdeb_zone_state *zsp;
+
+	if (devip->zcap == devip->zsize || zno < devip->nr_conv_zones)
+		return &devip->zstate[zno];
+
+	/*
+	 * If the zone capacity is less than the zone size, adjust for gap
+	 * zones.
+	 */
+	zno = 2 * zno - devip->nr_conv_zones;
+	WARN_ONCE(zno >= devip->nr_zones, "%u > %u\n", zno, devip->nr_zones);
+	zsp = &devip->zstate[zno];
+	if (lba >= zsp->z_start + zsp->z_size)
+		zsp++;
+	WARN_ON_ONCE(lba >= zsp->z_start + zsp->z_size);
+	return zsp;
 }
 
 static inline bool zbc_zone_is_conv(struct sdeb_zone_state *zsp)
 {
-	return zsp->z_type == ZBC_ZONE_TYPE_CNV;
+	return zsp->z_type == ZBC_ZTYPE_CNV;
+}
+
+static inline bool zbc_zone_is_gap(struct sdeb_zone_state *zsp)
+{
+	return zsp->z_type == ZBC_ZTYPE_GAP;
+}
+
+static inline bool zbc_zone_is_seq(struct sdeb_zone_state *zsp)
+{
+	return !zbc_zone_is_conv(zsp) && !zbc_zone_is_gap(zsp);
 }
 
 static void zbc_close_zone(struct sdebug_dev_info *devip,
@@ -2678,7 +2727,7 @@ static void zbc_close_zone(struct sdebug_dev_info *devip,
 {
 	enum sdebug_z_cond zc;
 
-	if (zbc_zone_is_conv(zsp))
+	if (!zbc_zone_is_seq(zsp))
 		return;
 
 	zc = zsp->z_cond;
@@ -2716,7 +2765,7 @@ static void zbc_open_zone(struct sdebug_dev_info *devip,
 {
 	enum sdebug_z_cond zc;
 
-	if (zbc_zone_is_conv(zsp))
+	if (!zbc_zone_is_seq(zsp))
 		return;
 
 	zc = zsp->z_cond;
@@ -2742,19 +2791,37 @@ static void zbc_open_zone(struct sdebug_dev_info *devip,
 	}
 }
 
+static inline void zbc_set_zone_full(struct sdebug_dev_info *devip,
+				     struct sdeb_zone_state *zsp)
+{
+	switch (zsp->z_cond) {
+	case ZC2_IMPLICIT_OPEN:
+		devip->nr_imp_open--;
+		break;
+	case ZC3_EXPLICIT_OPEN:
+		devip->nr_exp_open--;
+		break;
+	default:
+		WARN_ONCE(true, "Invalid zone %llu condition %x\n",
+			  zsp->z_start, zsp->z_cond);
+		break;
+	}
+	zsp->z_cond = ZC5_FULL;
+}
+
 static void zbc_inc_wp(struct sdebug_dev_info *devip,
 		       unsigned long long lba, unsigned int num)
 {
 	struct sdeb_zone_state *zsp = zbc_zone(devip, lba);
 	unsigned long long n, end, zend = zsp->z_start + zsp->z_size;
 
-	if (zbc_zone_is_conv(zsp))
+	if (!zbc_zone_is_seq(zsp))
 		return;
 
-	if (zsp->z_type == ZBC_ZONE_TYPE_SWR) {
+	if (zsp->z_type == ZBC_ZTYPE_SWR) {
 		zsp->z_wp += num;
 		if (zsp->z_wp >= zend)
-			zsp->z_cond = ZC5_FULL;
+			zbc_set_zone_full(devip, zsp);
 		return;
 	}
 
@@ -2773,7 +2840,7 @@ static void zbc_inc_wp(struct sdebug_dev_info *devip,
 			n = num;
 		}
 		if (zsp->z_wp >= zend)
-			zsp->z_cond = ZC5_FULL;
+			zbc_set_zone_full(devip, zsp);
 
 		num -= n;
 		lba += n;
@@ -2796,15 +2863,20 @@ static int check_zbc_access_params(struct scsi_cmnd *scp,
 		if (devip->zmodel == BLK_ZONED_HA)
 			return 0;
 		/* For host-managed, reads cannot cross zone types boundaries */
-		if (zsp_end != zsp &&
-		    zbc_zone_is_conv(zsp) &&
-		    !zbc_zone_is_conv(zsp_end)) {
+		if (zsp->z_type != zsp_end->z_type) {
 			mk_sense_buffer(scp, ILLEGAL_REQUEST,
 					LBA_OUT_OF_RANGE,
 					READ_INVDATA_ASCQ);
 			return check_condition_result;
 		}
 		return 0;
+	}
+
+	/* Writing into a gap zone is not allowed */
+	if (zbc_zone_is_gap(zsp)) {
+		mk_sense_buffer(scp, ILLEGAL_REQUEST, LBA_OUT_OF_RANGE,
+				ATTEMPT_ACCESS_GAP);
+		return check_condition_result;
 	}
 
 	/* No restrictions for writes within conventional zones */
@@ -2818,7 +2890,7 @@ static int check_zbc_access_params(struct scsi_cmnd *scp,
 		return 0;
 	}
 
-	if (zsp->z_type == ZBC_ZONE_TYPE_SWR) {
+	if (zsp->z_type == ZBC_ZTYPE_SWR) {
 		/* Writes cannot cross sequential zone boundaries */
 		if (zsp_end != zsp) {
 			mk_sense_buffer(scp, ILLEGAL_REQUEST,
@@ -3610,7 +3682,7 @@ static int resp_write_scat(struct scsi_cmnd *scp,
 		mk_sense_buffer(scp, ILLEGAL_REQUEST, INVALID_FIELD_IN_CDB, 0);
 		return illegal_condition_result;
 	}
-	lrdp = kzalloc(lbdof_blen, GFP_ATOMIC);
+	lrdp = kzalloc(lbdof_blen, GFP_ATOMIC | __GFP_NOWARN);
 	if (lrdp == NULL)
 		return SCSI_MLQUEUE_HOST_BUSY;
 	if (sdebug_verbose)
@@ -4258,13 +4330,15 @@ static int resp_verify(struct scsi_cmnd *scp, struct sdebug_dev_info *devip)
 		mk_sense_invalid_opcode(scp);
 		return check_condition_result;
 	}
+	if (vnum == 0)
+		return 0;	/* not an error */
 	a_num = is_bytchk3 ? 1 : vnum;
 	/* Treat following check like one for read (i.e. no write) access */
 	ret = check_device_access_params(scp, lba, a_num, false);
 	if (ret)
 		return ret;
 
-	arr = kcalloc(lb_size, vnum, GFP_ATOMIC);
+	arr = kcalloc(lb_size, vnum, GFP_ATOMIC | __GFP_NOWARN);
 	if (!arr) {
 		mk_sense_buffer(scp, ILLEGAL_REQUEST, INSUFF_RES_ASC,
 				INSUFF_RES_ASCQ);
@@ -4300,18 +4374,18 @@ cleanup:
 
 #define RZONES_DESC_HD 64
 
-/* Report zones depending on start LBA nad reporting options */
+/* Report zones depending on start LBA and reporting options */
 static int resp_report_zones(struct scsi_cmnd *scp,
 			     struct sdebug_dev_info *devip)
 {
-	unsigned int i, max_zones, rep_max_zones, nrz = 0;
+	unsigned int rep_max_zones, nrz = 0;
 	int ret = 0;
 	u32 alloc_len, rep_opts, rep_len;
 	bool partial;
 	u64 lba, zs_lba;
 	u8 *arr = NULL, *desc;
 	u8 *cmd = scp->cmnd;
-	struct sdeb_zone_state *zsp;
+	struct sdeb_zone_state *zsp = NULL;
 	struct sdeb_store_info *sip = devip2sip(devip, false);
 	rwlock_t *macc_lckp = sip ? &sip->macc_lck : &sdeb_fake_rw_lck;
 
@@ -4321,6 +4395,8 @@ static int resp_report_zones(struct scsi_cmnd *scp,
 	}
 	zs_lba = get_unaligned_be64(cmd + 2);
 	alloc_len = get_unaligned_be32(cmd + 10);
+	if (alloc_len == 0)
+		return 0;	/* not an error */
 	rep_opts = cmd[14] & 0x3f;
 	partial = cmd[14] & 0x80;
 
@@ -4329,11 +4405,9 @@ static int resp_report_zones(struct scsi_cmnd *scp,
 		return check_condition_result;
 	}
 
-	max_zones = devip->nr_zones - (zs_lba >> devip->zsize_shift);
-	rep_max_zones = min((alloc_len - 64) >> ilog2(RZONES_DESC_HD),
-			    max_zones);
+	rep_max_zones = (alloc_len - 64) >> ilog2(RZONES_DESC_HD);
 
-	arr = kcalloc(RZONES_DESC_HD, alloc_len, GFP_ATOMIC);
+	arr = kzalloc(alloc_len, GFP_ATOMIC | __GFP_NOWARN);
 	if (!arr) {
 		mk_sense_buffer(scp, ILLEGAL_REQUEST, INSUFF_RES_ASC,
 				INSUFF_RES_ASCQ);
@@ -4343,9 +4417,9 @@ static int resp_report_zones(struct scsi_cmnd *scp,
 	read_lock(macc_lckp);
 
 	desc = arr + 64;
-	for (i = 0; i < max_zones; i++) {
-		lba = zs_lba + devip->zsize * i;
-		if (lba > sdebug_capacity)
+	for (lba = zs_lba; lba < sdebug_capacity;
+	     lba = zsp->z_start + zsp->z_size) {
+		if (WARN_ONCE(zbc_zone(devip, lba) == zsp, "lba = %llu\n", lba))
 			break;
 		zsp = zbc_zone(devip, lba);
 		switch (rep_opts) {
@@ -4390,9 +4464,14 @@ static int resp_report_zones(struct scsi_cmnd *scp,
 			if (!zsp->z_non_seq_resource)
 				continue;
 			break;
+		case 0x3e:
+			/* All zones except gap zones. */
+			if (zbc_zone_is_gap(zsp))
+				continue;
+			break;
 		case 0x3f:
 			/* Not write pointer (conventional) zones */
-			if (!zbc_zone_is_conv(zsp))
+			if (zbc_zone_is_seq(zsp))
 				continue;
 			break;
 		default:
@@ -4421,11 +4500,16 @@ static int resp_report_zones(struct scsi_cmnd *scp,
 	}
 
 	/* Report header */
+	/* Zone list length. */
 	put_unaligned_be32(nrz * RZONES_DESC_HD, arr + 0);
+	/* Maximum LBA */
 	put_unaligned_be64(sdebug_capacity - 1, arr + 8);
+	/* Zone starting LBA granularity. */
+	if (devip->zcap < devip->zsize)
+		put_unaligned_be64(devip->zsize, arr + 16);
 
 	rep_len = (unsigned long)desc - (unsigned long)arr;
-	ret = fill_from_dev_buffer(scp, arr, min_t(int, alloc_len, rep_len));
+	ret = fill_from_dev_buffer(scp, arr, min_t(u32, alloc_len, rep_len));
 
 fini:
 	read_unlock(macc_lckp);
@@ -4648,8 +4732,9 @@ static void zbc_rwp_zone(struct sdebug_dev_info *devip,
 			 struct sdeb_zone_state *zsp)
 {
 	enum sdebug_z_cond zc;
+	struct sdeb_store_info *sip = devip2sip(devip, false);
 
-	if (zbc_zone_is_conv(zsp))
+	if (!zbc_zone_is_seq(zsp))
 		return;
 
 	zc = zsp->z_cond;
@@ -4658,6 +4743,10 @@ static void zbc_rwp_zone(struct sdebug_dev_info *devip,
 
 	if (zsp->z_cond == ZC4_CLOSED)
 		devip->nr_closed--;
+
+	if (zsp->z_wp > zsp->z_start)
+		memset(sip->storep + zsp->z_start * sdebug_sector_size, 0,
+		       (zsp->z_wp - zsp->z_start) * sdebug_sector_size);
 
 	zsp->z_non_seq_resource = false;
 	zsp->z_wp = zsp->z_start;
@@ -4832,10 +4921,19 @@ static void sdebug_q_cmd_wq_complete(struct work_struct *work)
 static bool got_shared_uuid;
 static uuid_t shared_uuid;
 
+static bool sdebug_is_zone_start(struct sdebug_dev_info *devip, u64 zstart)
+{
+	u32 remainder;
+
+	div_u64_rem(zstart, devip->zsize, &remainder);
+	return remainder == 0;
+}
+
 static int sdebug_device_create_zones(struct sdebug_dev_info *devip)
 {
 	struct sdeb_zone_state *zsp;
 	sector_t capacity = get_sdebug_capacity();
+	sector_t conv_capacity;
 	sector_t zstart = 0;
 	unsigned int i;
 
@@ -4855,10 +4953,6 @@ static int sdebug_device_create_zones(struct sdebug_dev_info *devip)
 			return -EINVAL;
 		}
 	} else {
-		if (!is_power_of_2(sdeb_zbc_zone_size_mb)) {
-			pr_err("Zone size is not a power of 2\n");
-			return -EINVAL;
-		}
 		devip->zsize = (sdeb_zbc_zone_size_mb * SZ_1M)
 			>> ilog2(sdebug_sector_size);
 		if (devip->zsize >= capacity) {
@@ -4867,14 +4961,32 @@ static int sdebug_device_create_zones(struct sdebug_dev_info *devip)
 		}
 	}
 
-	devip->zsize_shift = ilog2(devip->zsize);
-	devip->nr_zones = (capacity + devip->zsize - 1) >> devip->zsize_shift;
+	devip->nr_zones = div_u64(capacity + devip->zsize - 1, devip->zsize);
 
-	if (sdeb_zbc_nr_conv >= devip->nr_zones) {
+	if (sdeb_zbc_zone_cap_mb == 0) {
+		devip->zcap = devip->zsize;
+	} else {
+		devip->zcap = (sdeb_zbc_zone_cap_mb * SZ_1M) >>
+			      ilog2(sdebug_sector_size);
+		if (devip->zcap > devip->zsize) {
+			pr_err("Zone capacity too large\n");
+			return -EINVAL;
+		}
+	}
+
+	conv_capacity = (sector_t)sdeb_zbc_nr_conv * devip->zsize;
+	if (conv_capacity >= capacity) {
 		pr_err("Number of conventional zones too large\n");
 		return -EINVAL;
 	}
 	devip->nr_conv_zones = sdeb_zbc_nr_conv;
+	devip->nr_seq_zones = div_u64(capacity - conv_capacity +
+				      devip->zsize - 1, devip->zsize);
+	devip->nr_zones = devip->nr_conv_zones + devip->nr_seq_zones;
+
+	/* Add gap zones if zone capacity is smaller than the zone size */
+	if (devip->zcap < devip->zsize)
+		devip->nr_zones += devip->nr_seq_zones;
 
 	if (devip->zmodel == BLK_ZONED_HM) {
 		/* zbc_max_open_zones can be 0, meaning "not reported" */
@@ -4895,23 +5007,29 @@ static int sdebug_device_create_zones(struct sdebug_dev_info *devip)
 		zsp->z_start = zstart;
 
 		if (i < devip->nr_conv_zones) {
-			zsp->z_type = ZBC_ZONE_TYPE_CNV;
+			zsp->z_type = ZBC_ZTYPE_CNV;
 			zsp->z_cond = ZBC_NOT_WRITE_POINTER;
 			zsp->z_wp = (sector_t)-1;
-		} else {
+			zsp->z_size =
+				min_t(u64, devip->zsize, capacity - zstart);
+		} else if (sdebug_is_zone_start(devip, zstart)) {
 			if (devip->zmodel == BLK_ZONED_HM)
-				zsp->z_type = ZBC_ZONE_TYPE_SWR;
+				zsp->z_type = ZBC_ZTYPE_SWR;
 			else
-				zsp->z_type = ZBC_ZONE_TYPE_SWP;
+				zsp->z_type = ZBC_ZTYPE_SWP;
 			zsp->z_cond = ZC1_EMPTY;
 			zsp->z_wp = zsp->z_start;
+			zsp->z_size =
+				min_t(u64, devip->zcap, capacity - zstart);
+		} else {
+			zsp->z_type = ZBC_ZTYPE_GAP;
+			zsp->z_cond = ZBC_NOT_WRITE_POINTER;
+			zsp->z_wp = (sector_t)-1;
+			zsp->z_size = min_t(u64, devip->zsize - devip->zcap,
+					    capacity - zstart);
 		}
 
-		if (zsp->z_start + devip->zsize < capacity)
-			zsp->z_size = devip->zsize;
-		else
-			zsp->z_size = capacity - zsp->z_start;
-
+		WARN_ON_ONCE((int)zsp->z_size <= 0);
 		zstart += zsp->z_size;
 	}
 
@@ -5679,6 +5797,7 @@ module_param_named(wp, sdebug_wp, bool, S_IRUGO | S_IWUSR);
 module_param_named(write_same_length, sdebug_write_same_length, int,
 		   S_IRUGO | S_IWUSR);
 module_param_named(zbc, sdeb_zbc_model_s, charp, S_IRUGO);
+module_param_named(zone_cap_mb, sdeb_zbc_zone_cap_mb, int, S_IRUGO);
 module_param_named(zone_max_open, sdeb_zbc_max_open, int, S_IRUGO);
 module_param_named(zone_nr_conv, sdeb_zbc_nr_conv, int, S_IRUGO);
 module_param_named(zone_size_mb, sdeb_zbc_zone_size_mb, int, S_IRUGO);
@@ -5749,6 +5868,7 @@ MODULE_PARM_DESC(vpd_use_hostno, "0 -> dev ids ignore hostno (def=1 -> unique de
 MODULE_PARM_DESC(wp, "Write Protect (def=0)");
 MODULE_PARM_DESC(write_same_length, "Maximum blocks per WRITE SAME cmd (def=0xffff)");
 MODULE_PARM_DESC(zbc, "'none' [0]; 'aware' [1]; 'managed' [2] (def=0). Can have 'host-' prefix");
+MODULE_PARM_DESC(zone_cap_mb, "Zone capacity in MiB (def=zone size)");
 MODULE_PARM_DESC(zone_max_open, "Maximum number of open zones; [0] for no limit (def=auto)");
 MODULE_PARM_DESC(zone_nr_conv, "Number of conventional zones (def=1)");
 MODULE_PARM_DESC(zone_size_mb, "Zone size in MiB (def=auto)");
@@ -7100,8 +7220,12 @@ static int sdebug_add_host_helper(int per_host_idx)
 	dev_set_name(&sdbg_host->dev, "adapter%d", sdebug_num_hosts);
 
 	error = device_register(&sdbg_host->dev);
-	if (error)
+	if (error) {
+		spin_lock(&sdebug_host_list_lock);
+		list_del(&sdbg_host->host_list);
+		spin_unlock(&sdebug_host_list_lock);
 		goto clean;
+	}
 
 	++sdebug_num_hosts;
 	return 0;
@@ -7113,7 +7237,10 @@ clean:
 		kfree(sdbg_devinfo->zstate);
 		kfree(sdbg_devinfo);
 	}
-	kfree(sdbg_host);
+	if (sdbg_host->dev.release)
+		put_device(&sdbg_host->dev);
+	else
+		kfree(sdbg_host);
 	pr_warn("%s: failed, errno=%d\n", __func__, -error);
 	return error;
 }

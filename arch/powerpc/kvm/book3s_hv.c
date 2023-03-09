@@ -1731,7 +1731,6 @@ static int kvmppc_handle_exit_hv(struct kvm_vcpu *vcpu,
 
 static int kvmppc_handle_nested_exit(struct kvm_vcpu *vcpu)
 {
-	struct kvm_nested_guest *nested = vcpu->arch.nested;
 	int r;
 	int srcu_idx;
 
@@ -1831,7 +1830,7 @@ static int kvmppc_handle_nested_exit(struct kvm_vcpu *vcpu)
 		 * it into a HEAI.
 		 */
 		if (!(vcpu->arch.hfscr_permitted & (1UL << cause)) ||
-					(nested->hfscr & (1UL << cause))) {
+				(vcpu->arch.nested_hfscr & (1UL << cause))) {
 			vcpu->arch.trap = BOOK3S_INTERRUPT_H_EMUL_ASSIST;
 
 			/*
@@ -1993,7 +1992,7 @@ static void kvmppc_set_lpcr(struct kvm_vcpu *vcpu, u64 new_lpcr,
 	 */
 	if ((new_lpcr & LPCR_ILE) != (vc->lpcr & LPCR_ILE)) {
 		struct kvm_vcpu *vcpu;
-		int i;
+		unsigned long i;
 
 		kvm_for_each_vcpu(i, vcpu, kvm) {
 			if (vcpu->arch.vcore != vc)
@@ -3726,7 +3725,20 @@ static noinline void kvmppc_run_core(struct kvmppc_vcore *vc)
 
 	kvmppc_set_host_core(pcpu);
 
-	guest_exit_irqoff();
+	context_tracking_guest_exit();
+	if (!vtime_accounting_enabled_this_cpu()) {
+		local_irq_enable();
+		/*
+		 * Service IRQs here before vtime_account_guest_exit() so any
+		 * ticks that occurred while running the guest are accounted to
+		 * the guest. If vtime accounting is enabled, accounting uses
+		 * TB rather than ticks, so it can be done without enabling
+		 * interrupts here, which has the problem that it accounts
+		 * interrupt processing overhead to the host.
+		 */
+		local_irq_disable();
+	}
+	vtime_account_guest_exit();
 
 	local_irq_enable();
 
@@ -4510,7 +4522,20 @@ int kvmhv_run_single_vcpu(struct kvm_vcpu *vcpu, u64 time_limit,
 
 	kvmppc_set_host_core(pcpu);
 
-	guest_exit_irqoff();
+	context_tracking_guest_exit();
+	if (!vtime_accounting_enabled_this_cpu()) {
+		local_irq_enable();
+		/*
+		 * Service IRQs here before vtime_account_guest_exit() so any
+		 * ticks that occurred while running the guest are accounted to
+		 * the guest. If vtime accounting is enabled, accounting uses
+		 * TB rather than ticks, so it can be done without enabling
+		 * interrupts here, which has the problem that it accounts
+		 * interrupt processing overhead to the host.
+		 */
+		local_irq_disable();
+	}
+	vtime_account_guest_exit();
 
 	local_irq_enable();
 
@@ -4760,8 +4785,8 @@ static int kvm_vm_ioctl_get_dirty_log_hv(struct kvm *kvm,
 {
 	struct kvm_memslots *slots;
 	struct kvm_memory_slot *memslot;
-	int i, r;
-	unsigned long n;
+	int r;
+	unsigned long n, i;
 	unsigned long *buf, *p;
 	struct kvm_vcpu *vcpu;
 
@@ -4835,8 +4860,12 @@ static int kvmppc_core_prepare_memory_region_hv(struct kvm *kvm,
 	unsigned long npages = mem->memory_size >> PAGE_SHIFT;
 
 	if (change == KVM_MR_CREATE) {
-		slot->arch.rmap = vzalloc(array_size(npages,
-					  sizeof(*slot->arch.rmap)));
+		unsigned long size = array_size(npages, sizeof(*slot->arch.rmap));
+
+		if ((size >> PAGE_SHIFT) > totalram_pages())
+			return -ENOMEM;
+
+		slot->arch.rmap = vzalloc(size);
 		if (!slot->arch.rmap)
 			return -ENOMEM;
 	}
@@ -5206,6 +5235,10 @@ static int kvmppc_core_init_vm_hv(struct kvm *kvm)
 		kvm->arch.host_lpcr = lpcr = mfspr(SPRN_LPCR);
 		lpcr &= LPCR_PECE | LPCR_LPES;
 	} else {
+		/*
+		 * The L2 LPES mode will be set by the L0 according to whether
+		 * or not it needs to take external interrupts in HV mode.
+		 */
 		lpcr = 0;
 	}
 	lpcr |= (4UL << LPCR_DPFD_SH) | LPCR_HDICE |
@@ -5835,7 +5868,7 @@ static int kvmhv_svm_off(struct kvm *kvm)
 	int mmu_was_ready;
 	int srcu_idx;
 	int ret = 0;
-	int i;
+	unsigned long i;
 
 	if (!(kvm->arch.secure_guest & KVMPPC_SECURE_INIT_START))
 		return ret;
@@ -6072,8 +6105,11 @@ static int kvmppc_book3s_init_hv(void)
 	if (r)
 		return r;
 
-	if (kvmppc_radix_possible())
+	if (kvmppc_radix_possible()) {
 		r = kvmppc_radix_init();
+		if (r)
+			return r;
+	}
 
 	r = kvmppc_uvmem_init();
 	if (r < 0)

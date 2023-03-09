@@ -16,6 +16,7 @@
 #include <net/ieee80211_radiotap.h>
 #include <net/tcp.h>
 
+#include "iwl-drv.h"
 #include "iwl-op-mode.h"
 #include "iwl-io.h"
 #include "mvm.h"
@@ -294,7 +295,6 @@ static const u8 he_if_types_ext_capa_sta[] = {
 	 [0] = WLAN_EXT_CAPA1_EXT_CHANNEL_SWITCHING,
 	 [2] = WLAN_EXT_CAPA3_MULTI_BSSID_SUPPORT,
 	 [7] = WLAN_EXT_CAPA8_OPMODE_NOTIF,
-	 [9] = WLAN_EXT_CAPA10_TWT_REQUESTER_SUPPORT,
 };
 
 static const struct wiphy_iftype_ext_capab he_iftypes_ext_capa[] = {
@@ -1116,9 +1116,30 @@ static int iwl_mvm_mac_start(struct ieee80211_hw *hw)
 {
 	struct iwl_mvm *mvm = IWL_MAC80211_GET_MVM(hw);
 	int ret;
+	int retry, max_retry = 0;
 
 	mutex_lock(&mvm->mutex);
-	ret = __iwl_mvm_mac_start(mvm);
+
+	/* we are starting the mac not in error flow, and restart is enabled */
+	if (!test_bit(IWL_MVM_STATUS_HW_RESTART_REQUESTED, &mvm->status) &&
+	    iwlwifi_mod_params.fw_restart) {
+		max_retry = IWL_MAX_INIT_RETRY;
+		/*
+		 * This will prevent mac80211 recovery flows to trigger during
+		 * init failures
+		 */
+		set_bit(IWL_MVM_STATUS_STARTING, &mvm->status);
+	}
+
+	for (retry = 0; retry <= max_retry; retry++) {
+		ret = __iwl_mvm_mac_start(mvm);
+		if (!ret)
+			break;
+
+		IWL_ERR(mvm, "mac start retry %d\n", retry);
+	}
+	clear_bit(IWL_MVM_STATUS_STARTING, &mvm->status);
+
 	mutex_unlock(&mvm->mutex);
 
 	return ret;
@@ -1665,6 +1686,7 @@ static void iwl_mvm_recalc_multicast(struct iwl_mvm *mvm)
 	struct iwl_mvm_mc_iter_data iter_data = {
 		.mvm = mvm,
 	};
+	int ret;
 
 	lockdep_assert_held(&mvm->mutex);
 
@@ -1674,6 +1696,22 @@ static void iwl_mvm_recalc_multicast(struct iwl_mvm *mvm)
 	ieee80211_iterate_active_interfaces_atomic(
 		mvm->hw, IEEE80211_IFACE_ITER_NORMAL,
 		iwl_mvm_mc_iface_iterator, &iter_data);
+
+	/*
+	 * Send a (synchronous) ech command so that we wait for the
+	 * multiple asynchronous MCAST_FILTER_CMD commands sent by
+	 * the interface iterator. Otherwise, we might get here over
+	 * and over again (by userspace just sending a lot of these)
+	 * and the CPU can send them faster than the firmware can
+	 * process them.
+	 * Note that the CPU is still faster - but with this we'll
+	 * actually send fewer commands overall because the CPU will
+	 * not schedule the work in mac80211 as frequently if it's
+	 * still running when rescheduled (possibly multiple times).
+	 */
+	ret = iwl_mvm_send_cmd_pdu(mvm, ECHO_CMD, 0, 0, NULL);
+	if (ret)
+		IWL_ERR(mvm, "Failed to synchronize multicast groups update\n");
 }
 
 static u64 iwl_mvm_prepare_multicast(struct ieee80211_hw *hw,
@@ -2031,7 +2069,7 @@ static void iwl_mvm_cfg_he_sta(struct iwl_mvm *mvm,
 		return;
 	}
 
-	if (!sta->he_cap.has_he) {
+	if (!sta->deflink.he_cap.has_he) {
 		rcu_read_unlock();
 		return;
 	}
@@ -2043,17 +2081,17 @@ static void iwl_mvm_cfg_he_sta(struct iwl_mvm *mvm,
 		flags |= STA_CTXT_HE_RU_2MHZ_BLOCK;
 
 	/* HTC flags */
-	if (sta->he_cap.he_cap_elem.mac_cap_info[0] &
+	if (sta->deflink.he_cap.he_cap_elem.mac_cap_info[0] &
 	    IEEE80211_HE_MAC_CAP0_HTC_HE)
 		sta_ctxt_cmd.htc_flags |= cpu_to_le32(IWL_HE_HTC_SUPPORT);
-	if ((sta->he_cap.he_cap_elem.mac_cap_info[1] &
+	if ((sta->deflink.he_cap.he_cap_elem.mac_cap_info[1] &
 	      IEEE80211_HE_MAC_CAP1_LINK_ADAPTATION) ||
-	    (sta->he_cap.he_cap_elem.mac_cap_info[2] &
+	    (sta->deflink.he_cap.he_cap_elem.mac_cap_info[2] &
 	      IEEE80211_HE_MAC_CAP2_LINK_ADAPTATION)) {
 		u8 link_adap =
-			((sta->he_cap.he_cap_elem.mac_cap_info[2] &
+			((sta->deflink.he_cap.he_cap_elem.mac_cap_info[2] &
 			  IEEE80211_HE_MAC_CAP2_LINK_ADAPTATION) << 1) +
-			 (sta->he_cap.he_cap_elem.mac_cap_info[1] &
+			 (sta->deflink.he_cap.he_cap_elem.mac_cap_info[1] &
 			  IEEE80211_HE_MAC_CAP1_LINK_ADAPTATION);
 
 		if (link_adap == 2)
@@ -2063,12 +2101,12 @@ static void iwl_mvm_cfg_he_sta(struct iwl_mvm *mvm,
 			sta_ctxt_cmd.htc_flags |=
 				cpu_to_le32(IWL_HE_HTC_LINK_ADAP_BOTH);
 	}
-	if (sta->he_cap.he_cap_elem.mac_cap_info[2] & IEEE80211_HE_MAC_CAP2_BSR)
+	if (sta->deflink.he_cap.he_cap_elem.mac_cap_info[2] & IEEE80211_HE_MAC_CAP2_BSR)
 		sta_ctxt_cmd.htc_flags |= cpu_to_le32(IWL_HE_HTC_BSR_SUPP);
-	if (sta->he_cap.he_cap_elem.mac_cap_info[3] &
+	if (sta->deflink.he_cap.he_cap_elem.mac_cap_info[3] &
 	    IEEE80211_HE_MAC_CAP3_OMI_CONTROL)
 		sta_ctxt_cmd.htc_flags |= cpu_to_le32(IWL_HE_HTC_OMI_SUPP);
-	if (sta->he_cap.he_cap_elem.mac_cap_info[4] & IEEE80211_HE_MAC_CAP4_BQR)
+	if (sta->deflink.he_cap.he_cap_elem.mac_cap_info[4] & IEEE80211_HE_MAC_CAP4_BQR)
 		sta_ctxt_cmd.htc_flags |= cpu_to_le32(IWL_HE_HTC_BQR_SUPP);
 
 	/*
@@ -2078,15 +2116,15 @@ static void iwl_mvm_cfg_he_sta(struct iwl_mvm *mvm,
 	memset(&sta_ctxt_cmd.pkt_ext, 7, sizeof(sta_ctxt_cmd.pkt_ext));
 
 	/* If PPE Thresholds exist, parse them into a FW-familiar format. */
-	if (sta->he_cap.he_cap_elem.phy_cap_info[6] &
+	if (sta->deflink.he_cap.he_cap_elem.phy_cap_info[6] &
 	    IEEE80211_HE_PHY_CAP6_PPE_THRESHOLD_PRESENT) {
-		u8 nss = (sta->he_cap.ppe_thres[0] &
+		u8 nss = (sta->deflink.he_cap.ppe_thres[0] &
 			  IEEE80211_PPE_THRES_NSS_MASK) + 1;
 		u8 ru_index_bitmap =
-			(sta->he_cap.ppe_thres[0] &
+			(sta->deflink.he_cap.ppe_thres[0] &
 			 IEEE80211_PPE_THRES_RU_INDEX_BITMASK_MASK) >>
 			IEEE80211_PPE_THRES_RU_INDEX_BITMASK_POS;
-		u8 *ppe = &sta->he_cap.ppe_thres[0];
+		u8 *ppe = &sta->deflink.he_cap.ppe_thres[0];
 		u8 ppe_pos_bit = 7; /* Starting after PPE header */
 
 		/*
@@ -2124,14 +2162,14 @@ static void iwl_mvm_cfg_he_sta(struct iwl_mvm *mvm,
 		}
 
 		flags |= STA_CTXT_HE_PACKET_EXT;
-	} else if ((sta->he_cap.he_cap_elem.phy_cap_info[9] &
+	} else if ((sta->deflink.he_cap.he_cap_elem.phy_cap_info[9] &
 		    IEEE80211_HE_PHY_CAP9_NOMIMAL_PKT_PADDING_MASK) !=
 		  IEEE80211_HE_PHY_CAP9_NOMIMAL_PKT_PADDING_RESERVED) {
 		int low_th = -1;
 		int high_th = -1;
 
 		/* Take the PPE thresholds from the nominal padding info */
-		switch (sta->he_cap.he_cap_elem.phy_cap_info[9] &
+		switch (sta->deflink.he_cap.he_cap_elem.phy_cap_info[9] &
 			IEEE80211_HE_PHY_CAP9_NOMIMAL_PKT_PADDING_MASK) {
 		case IEEE80211_HE_PHY_CAP9_NOMIMAL_PKT_PADDING_0US:
 			low_th = IWL_HE_PKT_EXT_NONE;
@@ -2168,11 +2206,11 @@ static void iwl_mvm_cfg_he_sta(struct iwl_mvm *mvm,
 		}
 	}
 
-	if (sta->he_cap.he_cap_elem.mac_cap_info[2] &
+	if (sta->deflink.he_cap.he_cap_elem.mac_cap_info[2] &
 	    IEEE80211_HE_MAC_CAP2_32BIT_BA_BITMAP)
 		flags |= STA_CTXT_HE_32BIT_BA_BITMAP;
 
-	if (sta->he_cap.he_cap_elem.mac_cap_info[2] &
+	if (sta->deflink.he_cap.he_cap_elem.mac_cap_info[2] &
 	    IEEE80211_HE_MAC_CAP2_ACK_EN)
 		flags |= STA_CTXT_HE_ACK_ENABLED;
 
@@ -3133,7 +3171,7 @@ static int iwl_mvm_mac_sta_state(struct ieee80211_hw *hw,
 		}
 
 		if (vif->type == NL80211_IFTYPE_STATION)
-			vif->bss_conf.he_support = sta->he_cap.has_he;
+			vif->bss_conf.he_support = sta->deflink.he_cap.has_he;
 
 		if (sta->tdls &&
 		    (vif->p2p ||
@@ -3165,17 +3203,17 @@ static int iwl_mvm_mac_sta_state(struct ieee80211_hw *hw,
 	} else if (old_state == IEEE80211_STA_AUTH &&
 		   new_state == IEEE80211_STA_ASSOC) {
 		if (vif->type == NL80211_IFTYPE_AP) {
-			vif->bss_conf.he_support = sta->he_cap.has_he;
+			vif->bss_conf.he_support = sta->deflink.he_cap.has_he;
 			mvmvif->ap_assoc_sta_count++;
 			iwl_mvm_mac_ctxt_changed(mvm, vif, false, NULL);
 			if (vif->bss_conf.he_support &&
 			    !iwlwifi_mod_params.disable_11ax)
 				iwl_mvm_cfg_he_sta(mvm, vif, mvm_sta->sta_id);
 		} else if (vif->type == NL80211_IFTYPE_STATION) {
-			vif->bss_conf.he_support = sta->he_cap.has_he;
+			vif->bss_conf.he_support = sta->deflink.he_cap.has_he;
 
 			mvmvif->he_ru_2mhz_block = false;
-			if (sta->he_cap.has_he)
+			if (sta->deflink.he_cap.has_he)
 				iwl_mvm_check_he_obss_narrow_bw_ru(hw, vif);
 
 			iwl_mvm_mac_ctxt_changed(mvm, vif, false, NULL);
