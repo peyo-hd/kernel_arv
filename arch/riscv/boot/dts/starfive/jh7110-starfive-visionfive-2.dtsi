@@ -205,7 +205,7 @@
 	non-removable;
 	cap-mmc-hw-reset;
 	post-power-on-delay-ms = <200>;
-	status = "okay";
+	status = "disabled";
 };
 
 &mmc1 {
