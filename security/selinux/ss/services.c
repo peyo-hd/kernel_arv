@@ -68,6 +68,8 @@
 #include "policycap_names.h"
 #include "ima.h"
 
+#include <trace/hooks/selinux.h>
+
 struct selinux_policy_convert_data {
 	struct convert_context_args args;
 	struct sidtab_convert_params sidtab_params;
@@ -2158,6 +2160,10 @@ static void security_load_policycaps(struct selinux_state *state,
 			pr_info("SELinux:  unknown policy capability %u\n",
 				i);
 	}
+
+	state->android_netlink_route = p->android_netlink_route;
+	state->android_netlink_getneigh = p->android_netlink_getneigh;
+	selinux_nlmsg_init();
 }
 
 static int security_preserve_bools(struct selinux_policy *oldpolicy,
@@ -2251,6 +2257,7 @@ void selinux_policy_commit(struct selinux_state *state,
 		 */
 		selinux_mark_initialized(state);
 		selinux_complete_init();
+		trace_android_rvh_selinux_is_initialized(state);
 	}
 
 	/* Free the old policy */
