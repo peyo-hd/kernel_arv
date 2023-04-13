@@ -1,0 +1,715 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * stf_isp_hw_ops.c
+ *
+ * Register interface file for StarFive ISP driver
+ *
+ * Copyright (C) 2021-2023 StarFive Technology Co., Ltd.
+ *
+ */
+#include <linux/delay.h>
+
+#include "stf_camss.h"
+
+static const struct regval_t isp_reg_init_config_list[] = {
+	/* config DC */
+	{ISP_REG_DC_CFG_1,	DC_AXI_ID(0x0), 0},
+	/* config DEC */
+	{ISP_REG_DEC_CFG,	DEC_V_KEEP(0x0) | DEC_V_PERIOD(0x0) |
+				DEC_H_KEEP(0x0) | DEC_H_PERIOD(0x0), 0},
+	/* config OBC */
+	{ISP_REG_OBC_CFG,	OBC_W_H(11) | OBC_W_W(11), 0},
+	{ISP_REG_OBCG_CFG_0,	D_S0(0x40) | C_S0(0x40) |
+				B_S0(0x40) | A_S0(0x40), 0},
+	{ISP_REG_OBCG_CFG_1,	D_S0(0x40) | C_S0(0x40) |
+				B_S0(0x40) | A_S0(0x40), 0},
+	{ISP_REG_OBCG_CFG_2,	D_S0(0x40) | C_S0(0x40) |
+				B_S0(0x40) | A_S0(0x40), 0},
+	{ISP_REG_OBCG_CFG_3,	D_S0(0x40) | C_S0(0x40) |
+				B_S0(0x40) | A_S0(0x40), 0},
+	/* config LCBQ */
+	{ISP_REG_LCBQ_CFG_0,	H_LCBQ(0x9) | W_LCBQ(0x9), 0},
+	{ISP_REG_LCBQ_CFG_1,	Y_COOR(0x1e4) | Y_COOR(0x40), 0},
+	{ISP_REG_LCBQ_GAIN0_CFG_0,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN0_CFG_1,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN0_CFG_2,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN0_CFG_3,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN0_CFG_4,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN0_CFG_5,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN0_CFG_6,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN0_CFG_7,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN0_CFG_8,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN0_CFG_9,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN0_CFG_10,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN0_CFG_11,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN0_CFG_12,	GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN1_CFG_0,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN1_CFG_1,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN1_CFG_2,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN1_CFG_3,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN1_CFG_4,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN1_CFG_5,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN1_CFG_6,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN1_CFG_7,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN1_CFG_8,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN1_CFG_9,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN1_CFG_10,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN1_CFG_11,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN1_CFG_12,	GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN2_CFG_0,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN2_CFG_1,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN2_CFG_2,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN2_CFG_3,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN2_CFG_4,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN2_CFG_5,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN2_CFG_6,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN2_CFG_7,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN2_CFG_8,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN2_CFG_9,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN2_CFG_10,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN2_CFG_11,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN2_CFG_12,	GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN3_CFG_0,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN3_CFG_1,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN3_CFG_2,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN3_CFG_3,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN3_CFG_4,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN3_CFG_5,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN3_CFG_6,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN3_CFG_7,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN3_CFG_8,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN3_CFG_9,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN3_CFG_10,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN3_CFG_11,	GAIN_H(0x100) | GAIN_L(0x100), 0},
+	{ISP_REG_LCBQ_GAIN3_CFG_12,	GAIN_L(0x100), 0},
+	/* config OECF */
+	{ISP_REG_OECF_X0_CFG_0,	OCEF_X_PAR_H(0x10) | OCEF_X_PAR_L(0x0), 0},
+	{ISP_REG_OECF_X0_CFG_1,	OCEF_X_PAR_H(0x40) | OCEF_X_PAR_L(0x20), 0},
+	{ISP_REG_OECF_X0_CFG_2,	OCEF_X_PAR_H(0x80) | OCEF_X_PAR_L(0x60), 0},
+	{ISP_REG_OECF_X0_CFG_4,	OCEF_X_PAR_H(0x100) | OCEF_X_PAR_L(0xe0), 0},
+	{ISP_REG_OECF_X0_CFG_5,	OCEF_X_PAR_H(0x200) | OCEF_X_PAR_L(0x180), 0},
+	{ISP_REG_OECF_X0_CFG_6,	OCEF_X_PAR_H(0x300) | OCEF_X_PAR_L(0x280), 0},
+	{ISP_REG_OECF_X0_CFG_7,	OCEF_X_PAR_H(0x3fe) | OCEF_X_PAR_L(0x380), 0},
+	{ISP_REG_OECF_X1_CFG_0,	OCEF_X_PAR_H(0x10) | OCEF_X_PAR_L(0x0), 0},
+	{ISP_REG_OECF_X1_CFG_1,	OCEF_X_PAR_H(0x40) | OCEF_X_PAR_L(0x20), 0},
+	{ISP_REG_OECF_X1_CFG_2,	OCEF_X_PAR_H(0x80) | OCEF_X_PAR_L(0x60), 0},
+	{ISP_REG_OECF_X1_CFG_3,	OCEF_X_PAR_H(0xc0) | OCEF_X_PAR_L(0xa0), 0},
+	{ISP_REG_OECF_X1_CFG_4,	OCEF_X_PAR_H(0x100) | OCEF_X_PAR_L(0xe0), 0},
+	{ISP_REG_OECF_X1_CFG_5,	OCEF_X_PAR_H(0x200) | OCEF_X_PAR_L(0x180), 0},
+	{ISP_REG_OECF_X1_CFG_6,	OCEF_X_PAR_H(0x300) | OCEF_X_PAR_L(0x280), 0},
+	{ISP_REG_OECF_X1_CFG_7,	OCEF_X_PAR_H(0x3fe) | OCEF_X_PAR_L(0x380), 0},
+	{ISP_REG_OECF_X2_CFG_0,	OCEF_X_PAR_H(0x10) | OCEF_X_PAR_L(0x0), 0},
+	{ISP_REG_OECF_X2_CFG_1,	OCEF_X_PAR_H(0x40) | OCEF_X_PAR_L(0x20), 0},
+	{ISP_REG_OECF_X2_CFG_2,	OCEF_X_PAR_H(0x80) | OCEF_X_PAR_L(0x60), 0},
+	{ISP_REG_OECF_X2_CFG_3,	OCEF_X_PAR_H(0xc0) | OCEF_X_PAR_L(0xa0), 0},
+	{ISP_REG_OECF_X2_CFG_4,	OCEF_X_PAR_H(0x100) | OCEF_X_PAR_L(0xe0), 0},
+	{ISP_REG_OECF_X2_CFG_5,	OCEF_X_PAR_H(0x200) | OCEF_X_PAR_L(0x180), 0},
+	{ISP_REG_OECF_X2_CFG_6,	OCEF_X_PAR_H(0x300) | OCEF_X_PAR_L(0x280), 0},
+	{ISP_REG_OECF_X2_CFG_7,	OCEF_X_PAR_H(0x3fe) | OCEF_X_PAR_L(0x380), 0},
+	{ISP_REG_OECF_X3_CFG_0,	OCEF_X_PAR_H(0x10) | OCEF_X_PAR_L(0x0), 0},
+	{ISP_REG_OECF_X3_CFG_1,	OCEF_X_PAR_H(0x40) | OCEF_X_PAR_L(0x20), 0},
+	{ISP_REG_OECF_X3_CFG_2,	OCEF_X_PAR_H(0x80) | OCEF_X_PAR_L(0x60), 0},
+	{ISP_REG_OECF_X3_CFG_3,	OCEF_X_PAR_H(0xc0) | OCEF_X_PAR_L(0xa0), 0},
+	{ISP_REG_OECF_X3_CFG_4,	OCEF_X_PAR_H(0x100) | OCEF_X_PAR_L(0xe0), 0},
+	{ISP_REG_OECF_X3_CFG_5,	OCEF_X_PAR_H(0x200) | OCEF_X_PAR_L(0x180), 0},
+	{ISP_REG_OECF_X3_CFG_6,	OCEF_X_PAR_H(0x300) | OCEF_X_PAR_L(0x280), 0},
+	{ISP_REG_OECF_X3_CFG_7,	OCEF_X_PAR_H(0x3fe) | OCEF_X_PAR_L(0x380), 0},
+
+	{ISP_REG_OECF_Y0_CFG_0,	OCEF_Y_PAR_H(0x10) | OCEF_Y_PAR_L(0x0), 0},
+	{ISP_REG_OECF_Y0_CFG_1,	OCEF_Y_PAR_H(0x40) | OCEF_Y_PAR_L(0x20), 0},
+	{ISP_REG_OECF_Y0_CFG_2,	OCEF_Y_PAR_H(0x80) | OCEF_Y_PAR_L(0x60), 0},
+	{ISP_REG_OECF_Y0_CFG_3,	OCEF_Y_PAR_H(0xc0) | OCEF_Y_PAR_L(0xa0), 0},
+	{ISP_REG_OECF_Y0_CFG_4,	OCEF_Y_PAR_H(0x100) | OCEF_Y_PAR_L(0xe0), 0},
+	{ISP_REG_OECF_Y0_CFG_5,	OCEF_Y_PAR_H(0x200) | OCEF_Y_PAR_L(0x180), 0},
+	{ISP_REG_OECF_Y0_CFG_6,	OCEF_Y_PAR_H(0x300) | OCEF_Y_PAR_L(0x280), 0},
+	{ISP_REG_OECF_Y0_CFG_7,	OCEF_Y_PAR_H(0x3fe) | OCEF_Y_PAR_L(0x380), 0},
+	{ISP_REG_OECF_Y1_CFG_0,	OCEF_Y_PAR_H(0x10) | OCEF_Y_PAR_L(0x0), 0},
+	{ISP_REG_OECF_Y1_CFG_1,	OCEF_Y_PAR_H(0x40) | OCEF_Y_PAR_L(0x20), 0},
+	{ISP_REG_OECF_Y1_CFG_2,	OCEF_Y_PAR_H(0x80) | OCEF_Y_PAR_L(0x60), 0},
+	{ISP_REG_OECF_Y1_CFG_3,	OCEF_Y_PAR_H(0xc0) | OCEF_Y_PAR_L(0xa0), 0},
+	{ISP_REG_OECF_Y1_CFG_4,	OCEF_Y_PAR_H(0x100) | OCEF_Y_PAR_L(0xe0), 0},
+	{ISP_REG_OECF_Y1_CFG_5,	OCEF_Y_PAR_H(0x200) | OCEF_Y_PAR_L(0x180), 0},
+	{ISP_REG_OECF_Y1_CFG_6,	OCEF_Y_PAR_H(0x300) | OCEF_Y_PAR_L(0x280), 0},
+	{ISP_REG_OECF_Y1_CFG_7,	OCEF_Y_PAR_H(0x3fe) | OCEF_Y_PAR_L(0x380), 0},
+	{ISP_REG_OECF_Y2_CFG_0,	OCEF_Y_PAR_H(0x10) | OCEF_Y_PAR_L(0x0), 0},
+	{ISP_REG_OECF_Y2_CFG_1,	OCEF_Y_PAR_H(0x40) | OCEF_Y_PAR_L(0x20), 0},
+	{ISP_REG_OECF_Y2_CFG_2,	OCEF_Y_PAR_H(0x80) | OCEF_Y_PAR_L(0x60), 0},
+	{ISP_REG_OECF_Y2_CFG_3,	OCEF_Y_PAR_H(0xc0) | OCEF_Y_PAR_L(0xa0), 0},
+	{ISP_REG_OECF_Y2_CFG_4,	OCEF_Y_PAR_H(0x100) | OCEF_Y_PAR_L(0xe0), 0},
+	{ISP_REG_OECF_Y2_CFG_5,	OCEF_Y_PAR_H(0x200) | OCEF_Y_PAR_L(0x180), 0},
+	{ISP_REG_OECF_Y2_CFG_6,	OCEF_Y_PAR_H(0x300) | OCEF_Y_PAR_L(0x280), 0},
+	{ISP_REG_OECF_Y2_CFG_7,	OCEF_Y_PAR_H(0x3fe) | OCEF_Y_PAR_L(0x380), 0},
+	{ISP_REG_OECF_Y3_CFG_0,	OCEF_Y_PAR_H(0x10) | OCEF_Y_PAR_L(0x0), 0},
+	{ISP_REG_OECF_Y3_CFG_1,	OCEF_Y_PAR_H(0x40) | OCEF_Y_PAR_L(0x20), 0},
+	{ISP_REG_OECF_Y3_CFG_2,	OCEF_Y_PAR_H(0x80) | OCEF_Y_PAR_L(0x60), 0},
+	{ISP_REG_OECF_Y3_CFG_3,	OCEF_Y_PAR_H(0xc0) | OCEF_Y_PAR_L(0xa0), 0},
+	{ISP_REG_OECF_Y3_CFG_4,	OCEF_Y_PAR_H(0x100) | OCEF_Y_PAR_L(0xe0), 0},
+	{ISP_REG_OECF_Y3_CFG_5,	OCEF_Y_PAR_H(0x200) | OCEF_Y_PAR_L(0x180), 0},
+	{ISP_REG_OECF_Y3_CFG_6,	OCEF_Y_PAR_H(0x300) | OCEF_Y_PAR_L(0x280), 0},
+	{ISP_REG_OECF_Y3_CFG_7,	OCEF_Y_PAR_H(0x3fe) | OCEF_Y_PAR_L(0x380), 0},
+
+	{ISP_REG_OECF_S0_CFG_0,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S0_CFG_1,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S0_CFG_2,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S0_CFG_3,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S0_CFG_4,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S0_CFG_5,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S0_CFG_6,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S0_CFG_7,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S1_CFG_0,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S1_CFG_1,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S1_CFG_2,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S1_CFG_3,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S1_CFG_4,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S1_CFG_5,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S1_CFG_6,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S1_CFG_7,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S2_CFG_0,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S2_CFG_1,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S2_CFG_2,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S2_CFG_3,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S2_CFG_4,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S2_CFG_5,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S2_CFG_6,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S2_CFG_7,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S3_CFG_0,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S3_CFG_1,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S3_CFG_2,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S3_CFG_3,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S3_CFG_4,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S3_CFG_5,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S3_CFG_6,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	{ISP_REG_OECF_S3_CFG_7,	OCEF_S_PAR_H(0x80) | OCEF_S_PAR_L(0x80), 0},
+	/* config OECFHM */
+	{ISP_REG_OECFHM_Y_CFG_0,	OECFHM_H(0x400) | OECFHM_H(0x0), 0},
+	{ISP_REG_OECFHM_Y_CFG_1,	OECFHM_H(0xC00) | OECFHM_H(0x800), 0},
+	{ISP_REG_OECFHM_Y_CFG_2,	OECFHM_H(0x0) | OECFHM_H(0xfff), 0},
+	{ISP_REG_OECFHM_S_CFG_0,	OECFHM_H(0x800) | OECFHM_H(0x800), 0},
+	{ISP_REG_OECFHM_S_CFG_1,	OECFHM_H(0x800) | OECFHM_H(0x800), 0},
+	{ISP_REG_OECFHM_S_CFG_2,	OECFHM_H(0x0) | OECFHM_H(0x800), 0},
+	/* config LCCF */
+	{ISP_REG_LCCF_CFG_0,	Y_DISTANCE(0x21C) | X_DISTANCE(0x3C0), 0},
+	{ISP_REG_LCCF_CFG_1,	LCCF_MAX_DIS(0xb), 0},
+	{ISP_REG_LCCF_CFG_2,	LCCF_F2_PAR(0x0) | LCCF_F1_PAR(0x0), 0},
+	{ISP_REG_LCCF_CFG_3,	LCCF_F2_PAR(0x0) | LCCF_F1_PAR(0x0), 0},
+	{ISP_REG_LCCF_CFG_4,	LCCF_F2_PAR(0x0) | LCCF_F1_PAR(0x0), 0},
+	{ISP_REG_LCCF_CFG_5,	LCCF_F2_PAR(0x0) | LCCF_F1_PAR(0x0), 0},
+	/* config AWB */
+	{ISP_REG_AWB_X0_CFG_0,	AWB_X_SYMBOL1(0x0) | AWB_X_SYMBOL0(0x0), 0},
+	{ISP_REG_AWB_X0_CFG_1,	AWB_X_SYMBOL1(0x0) | AWB_X_SYMBOL0(0x0), 0},
+	{ISP_REG_AWB_X1_CFG_0,	AWB_X_SYMBOL1(0x0) | AWB_X_SYMBOL0(0x0), 0},
+	{ISP_REG_AWB_X1_CFG_1,	AWB_X_SYMBOL1(0x0) | AWB_X_SYMBOL0(0x0), 0},
+	{ISP_REG_AWB_X2_CFG_0,	AWB_X_SYMBOL1(0x0) | AWB_X_SYMBOL0(0x0), 0},
+	{ISP_REG_AWB_X2_CFG_1,	AWB_X_SYMBOL1(0x0) | AWB_X_SYMBOL0(0x0), 0},
+	{ISP_REG_AWB_X3_CFG_0,	AWB_X_SYMBOL1(0x0) | AWB_X_SYMBOL0(0x0), 0},
+	{ISP_REG_AWB_X3_CFG_1,	AWB_X_SYMBOL1(0x0) | AWB_X_SYMBOL0(0x0), 0},
+
+	{ISP_REG_AWB_Y0_CFG_0,	AWB_Y_SYMBOL1(0x0) | AWB_Y_SYMBOL0(0x0), 0},
+	{ISP_REG_AWB_Y0_CFG_1,	AWB_Y_SYMBOL1(0x0) | AWB_Y_SYMBOL0(0x0), 0},
+	{ISP_REG_AWB_Y1_CFG_0,	AWB_Y_SYMBOL1(0x0) | AWB_Y_SYMBOL0(0x0), 0},
+	{ISP_REG_AWB_Y1_CFG_1,	AWB_Y_SYMBOL1(0x0) | AWB_Y_SYMBOL0(0x0), 0},
+	{ISP_REG_AWB_Y2_CFG_0,	AWB_Y_SYMBOL1(0x0) | AWB_Y_SYMBOL0(0x0), 0},
+	{ISP_REG_AWB_Y2_CFG_1,	AWB_Y_SYMBOL1(0x0) | AWB_Y_SYMBOL0(0x0), 0},
+	{ISP_REG_AWB_Y3_CFG_0,	AWB_Y_SYMBOL1(0x0) | AWB_Y_SYMBOL0(0x0), 0},
+	{ISP_REG_AWB_Y3_CFG_1,	AWB_Y_SYMBOL1(0x0) | AWB_Y_SYMBOL0(0x0), 0},
+
+	{ISP_REG_AWB_S0_CFG_0,	AWB_S_SYMBOL1(0x80) | AWB_S_SYMBOL0(0x80), 0},
+	{ISP_REG_AWB_S0_CFG_1,	AWB_S_SYMBOL1(0x80) | AWB_S_SYMBOL0(0x80), 0},
+	{ISP_REG_AWB_S1_CFG_0,	AWB_S_SYMBOL1(0x80) | AWB_S_SYMBOL0(0x80), 0},
+	{ISP_REG_AWB_S1_CFG_1,	AWB_S_SYMBOL1(0x80) | AWB_S_SYMBOL0(0x80), 0},
+	{ISP_REG_AWB_S2_CFG_0,	AWB_S_SYMBOL1(0x80) | AWB_S_SYMBOL0(0x80), 0},
+	{ISP_REG_AWB_S2_CFG_1,	AWB_S_SYMBOL1(0x80) | AWB_S_SYMBOL0(0x80), 0},
+	{ISP_REG_AWB_S3_CFG_0,	AWB_S_SYMBOL1(0x80) | AWB_S_SYMBOL0(0x80), 0},
+	{ISP_REG_AWB_S3_CFG_1,	AWB_S_SYMBOL1(0x80) | AWB_S_SYMBOL0(0x80), 0},
+	/* config CTC and DBC filter */
+	{ISP_REG_ICTC,	MAXGT(0x4140) | MINGT(0x40), 0},
+	{ISP_REG_IDBC,	BADGT(0x200) | BADXT(0x200), 0},
+	/* config CFA */
+	{ISP_REG_RAW_FORMAT_CFG,	SMY13(0) | SMY12(1) | SMY11(0) |
+					SMY10(1) | SMY3(2) | SMY2(3) |
+					SMY1(2) | SMY0(3), 0},
+	{ISP_REG_ICFAM,	CROSS_COV(3) | HV_W(2), 0},
+	/* config CCM */
+	{ISP_REG_ICAMD_0,	DNRM(6) | CCM_M_DAT(0), 0},
+	{ISP_REG_ICAMD_12,	CCM_M_DAT(0x80), 0},
+	{ISP_REG_ICAMD_16,	CCM_M_DAT(0x80), 0},
+	{ISP_REG_ICAMD_20,	CCM_M_DAT(0x80), 0},
+	{ISP_REG_ICAMD_24,	CCM_M_DAT(0x700), 0},
+	{ISP_REG_ICAMD_25,	CCM_M_DAT(0x200), 0},
+	/* config GMARGB */
+	{ISP_REG_IGRVAL_0,	SGVAL(0x2400) | GVAL(0x0), 0},
+	{ISP_REG_IGRVAL_1,	SGVAL(0x800) | GVAL(0x20), 0},
+	{ISP_REG_IGRVAL_2,	SGVAL(0x800) | GVAL(0x40), 0},
+	{ISP_REG_IGRVAL_3,	SGVAL(0x800) | GVAL(0x60), 0},
+	{ISP_REG_IGRVAL_4,	SGVAL(0x800) | GVAL(0x80), 0},
+	{ISP_REG_IGRVAL_5,	SGVAL(0x800) | GVAL(0xa0), 0},
+	{ISP_REG_IGRVAL_6,	SGVAL(0x800) | GVAL(0xc0), 0},
+	{ISP_REG_IGRVAL_7,	SGVAL(0x800) | GVAL(0xe0), 0},
+	{ISP_REG_IGRVAL_8,	SGVAL(0x800) | GVAL(0x100), 0},
+	{ISP_REG_IGRVAL_9,	SGVAL(0x800) | GVAL(0x180), 0},
+	{ISP_REG_IGRVAL_10,	SGVAL(0x800) | GVAL(0x200), 0},
+	{ISP_REG_IGRVAL_11,	SGVAL(0x800) | GVAL(0x280), 0},
+	{ISP_REG_IGRVAL_12,	SGVAL(0x800) | GVAL(0x300), 0},
+	{ISP_REG_IGRVAL_13,	SGVAL(0x800) | GVAL(0x380), 0},
+	{ISP_REG_IGRVAL_14,	SGVAL(0x800) | GVAL(0x3fe), 0},
+	/* config R2Y */
+	{ISP_REG_ICCONV_0,	CSC_M(0x4C), 0},
+	{ISP_REG_ICCONV_1,	CSC_M(0x97), 0},
+	{ISP_REG_ICCONV_2,	CSC_M(0x1d), 0},
+	{ISP_REG_ICCONV_3,	CSC_M(0x1d5), 0},
+	{ISP_REG_ICCONV_4,	CSC_M(0x1ac), 0},
+	{ISP_REG_ICCONV_5,	CSC_M(0x80), 0},
+	{ISP_REG_ICCONV_6,	CSC_M(0x80), 0},
+	{ISP_REG_ICCONV_7,	CSC_M(0x194), 0},
+	{ISP_REG_ICCONV_8,	CSC_M(0x1ec), 0},
+	/* config YCRV */
+	{ISP_REG_YCURVE_0,	L_PARAM(0x0), 0},
+	{ISP_REG_YCURVE_1,	L_PARAM(0x10), 0},
+	{ISP_REG_YCURVE_2,	L_PARAM(0x20), 0},
+	{ISP_REG_YCURVE_3,	L_PARAM(0x30), 0},
+	{ISP_REG_YCURVE_4,	L_PARAM(0x40), 0},
+	{ISP_REG_YCURVE_5,	L_PARAM(0x50), 0},
+	{ISP_REG_YCURVE_6,	L_PARAM(0x60), 0},
+	{ISP_REG_YCURVE_7,	L_PARAM(0x70), 0},
+	{ISP_REG_YCURVE_8,	L_PARAM(0x80), 0},
+	{ISP_REG_YCURVE_9,	L_PARAM(0x90), 0},
+	{ISP_REG_YCURVE_10,	L_PARAM(0xa0), 0},
+	{ISP_REG_YCURVE_11,	L_PARAM(0xb0), 0},
+	{ISP_REG_YCURVE_12,	L_PARAM(0xc0), 0},
+	{ISP_REG_YCURVE_13,	L_PARAM(0xd0), 0},
+	{ISP_REG_YCURVE_14,	L_PARAM(0xe0), 0},
+	{ISP_REG_YCURVE_15,	L_PARAM(0xf0), 0},
+	{ISP_REG_YCURVE_16,	L_PARAM(0x100), 0},
+	{ISP_REG_YCURVE_17,	L_PARAM(0x110), 0},
+	{ISP_REG_YCURVE_18,	L_PARAM(0x120), 0},
+	{ISP_REG_YCURVE_19,	L_PARAM(0x130), 0},
+	{ISP_REG_YCURVE_20,	L_PARAM(0x140), 0},
+	{ISP_REG_YCURVE_21,	L_PARAM(0x150), 0},
+	{ISP_REG_YCURVE_22,	L_PARAM(0x160), 0},
+	{ISP_REG_YCURVE_23,	L_PARAM(0x170), 0},
+	{ISP_REG_YCURVE_24,	L_PARAM(0x180), 0},
+	{ISP_REG_YCURVE_25,	L_PARAM(0x190), 0},
+	{ISP_REG_YCURVE_26,	L_PARAM(0x1a0), 0},
+	{ISP_REG_YCURVE_27,	L_PARAM(0x1b0), 0},
+	{ISP_REG_YCURVE_28,	L_PARAM(0x1c0), 0},
+	{ISP_REG_YCURVE_29,	L_PARAM(0x1d0), 0},
+	{ISP_REG_YCURVE_30,	L_PARAM(0x1e0), 0},
+	{ISP_REG_YCURVE_31,	L_PARAM(0x1f0), 0},
+	{ISP_REG_YCURVE_32,	L_PARAM(0x200), 0},
+	{ISP_REG_YCURVE_33,	L_PARAM(0x210), 0},
+	{ISP_REG_YCURVE_34,	L_PARAM(0x220), 0},
+	{ISP_REG_YCURVE_35,	L_PARAM(0x230), 0},
+	{ISP_REG_YCURVE_36,	L_PARAM(0x240), 0},
+	{ISP_REG_YCURVE_37,	L_PARAM(0x250), 0},
+	{ISP_REG_YCURVE_38,	L_PARAM(0x260), 0},
+	{ISP_REG_YCURVE_39,	L_PARAM(0x270), 0},
+	{ISP_REG_YCURVE_40,	L_PARAM(0x280), 0},
+	{ISP_REG_YCURVE_41,	L_PARAM(0x290), 0},
+	{ISP_REG_YCURVE_42,	L_PARAM(0x2a0), 0},
+	{ISP_REG_YCURVE_43,	L_PARAM(0x2b0), 0},
+	{ISP_REG_YCURVE_44,	L_PARAM(0x2c0), 0},
+	{ISP_REG_YCURVE_45,	L_PARAM(0x2d0), 0},
+	{ISP_REG_YCURVE_46,	L_PARAM(0x2e0), 0},
+	{ISP_REG_YCURVE_47,	L_PARAM(0x2f0), 0},
+	{ISP_REG_YCURVE_48,	L_PARAM(0x300), 0},
+	{ISP_REG_YCURVE_49,	L_PARAM(0x310), 0},
+	{ISP_REG_YCURVE_50,	L_PARAM(0x320), 0},
+	{ISP_REG_YCURVE_51,	L_PARAM(0x330), 0},
+	{ISP_REG_YCURVE_52,	L_PARAM(0x340), 0},
+	{ISP_REG_YCURVE_53,	L_PARAM(0x350), 0},
+	{ISP_REG_YCURVE_54,	L_PARAM(0x360), 0},
+	{ISP_REG_YCURVE_55,	L_PARAM(0x370), 0},
+	{ISP_REG_YCURVE_56,	L_PARAM(0x380), 0},
+	{ISP_REG_YCURVE_57,	L_PARAM(0x390), 0},
+	{ISP_REG_YCURVE_58,	L_PARAM(0x3a0), 0},
+	{ISP_REG_YCURVE_59,	L_PARAM(0x3b0), 0},
+	{ISP_REG_YCURVE_60,	L_PARAM(0x3c0), 0},
+	{ISP_REG_YCURVE_61,	L_PARAM(0x3d0), 0},
+	{ISP_REG_YCURVE_62,	L_PARAM(0x3e0), 0},
+	{ISP_REG_YCURVE_63,	L_PARAM(0x3f0), 0},
+	/* config Sharp */
+	{ISP_REG_ISHRP1_0,	DIFF(0x7) | SHRP_W(0xf), 0},
+	{ISP_REG_ISHRP1_1,	DIFF(0x18) | SHRP_W(0xf), 0},
+	{ISP_REG_ISHRP1_2,	DIFF(0x80) | SHRP_W(0xf), 0},
+	{ISP_REG_ISHRP1_3,	DIFF(0x100) | SHRP_W(0xf), 0},
+	{ISP_REG_ISHRP1_4,	DIFF(0x10) | SHRP_W(0xf), 0},
+	{ISP_REG_ISHRP1_5,	DIFF(0x60) | SHRP_W(0xf), 0},
+	{ISP_REG_ISHRP1_6,	DIFF(0x100) | SHRP_W(0xf), 0},
+	{ISP_REG_ISHRP1_7,	DIFF(0x190) | SHRP_W(0xf), 0},
+	{ISP_REG_ISHRP1_8,	DIFF(0x0) | SHRP_W(0xf), 0},
+	{ISP_REG_ISHRP1_9,	SHRP_W(0xf), 0},
+	{ISP_REG_ISHRP1_10,	SHRP_W(0xf), 0},
+	{ISP_REG_ISHRP1_11,	SHRP_W(0xf), 0},
+	{ISP_REG_ISHRP1_12,	SHRP_W(0xf), 0},
+	{ISP_REG_ISHRP1_13,	SHRP_W(0xf), 0},
+	{ISP_REG_ISHRP1_14,	SHRP_W(0xf), 0},
+	{ISP_REG_ISHRP2_0,	F_AMP(0x10) | S_AMP(0x0), 0},
+	{ISP_REG_ISHRP2_1,	F_AMP(0x10) | S_AMP(0x0), 0},
+	{ISP_REG_ISHRP2_2,	F_AMP(0x10) | S_AMP(0x0), 0},
+	{ISP_REG_ISHRP2_3,	F_AMP(0x10) | S_AMP(0x0), 0},
+	{ISP_REG_ISHRP2_4,	F_AMP(0x10) | S_AMP(0x0), 0},
+	{ISP_REG_ISHRP2_5,	F_AMP(0x10) | S_AMP(0x0), 0},
+	{ISP_REG_ISHRP3,	PDIRF(0x8) | NDIRF(0x8) | WSUM(0xd7c), 0},
+
+	{ISP_REG_IUVS1,	UVDIFF2(0xC0) | UVDIFF1(0x40), 0},
+	{ISP_REG_IUVS2,	UVF(0xff) | UVSLOPE(0x0), 0},
+	{ISP_REG_IUVCKS1,	UVCKDIFF2(0xa0) | UVCKDIFF1(0x40), 0},
+	/* config DNYUV */
+	{ISP_REG_DNYUV_YSWR0,	YUVSW5(7) | YUVSW4(7) | YUVSW3(7) | YUVSW2(7) |
+				YUVSW1(7) | YUVSW0(7), 0},
+	{ISP_REG_DNYUV_YSWR1,	YUVSW3(7) | YUVSW2(7) | YUVSW1(7) |
+				YUVSW0(7), 0},
+	{ISP_REG_DNYUV_CSWR0,	YUVSW5(7) | YUVSW4(7) | YUVSW3(7) | YUVSW2(7) |
+				YUVSW1(7) | YUVSW0(7), 0},
+	{ISP_REG_DNYUV_CSWR1,	YUVSW3(7) | YUVSW2(7) | YUVSW1(7) |
+				YUVSW0(7), 0},
+	{ISP_REG_DNYUV_YDR0,	CURVE_D_H(0x60) | CURVE_D_L(0x40), 0},
+	{ISP_REG_DNYUV_YDR1,	CURVE_D_H(0xd8) | CURVE_D_L(0x90), 0},
+	{ISP_REG_DNYUV_YDR2,	CURVE_D_H(0x1e6) | CURVE_D_L(0x144), 0},
+	{ISP_REG_DNYUV_CDR0,	CURVE_D_H(0x60) | CURVE_D_L(0x40), 0},
+	{ISP_REG_DNYUV_CDR1,	CURVE_D_H(0xd8) | CURVE_D_L(0x90), 0},
+	{ISP_REG_DNYUV_CDR2,	CURVE_D_H(0x1e6) | CURVE_D_L(0x144), 0},
+	/* config SAT */
+	{ISP_REG_ISAT0,	CMMD(0x0) | CMAB(0x100), 0},
+	{ISP_REG_ISAT1,	CMD(0x1f) | CMB(0x1), 0},
+	{ISP_REG_ISAT2,	VOFF(0x0) | UOFF(0x0), 0},
+	{ISP_REG_ISAT3,	SIN(0x0) | COS(0x100), 0},
+	{ISP_REG_ISAT4,	CMSF(0x8), 0},
+	{ISP_REG_IYADJ0,	YOIR(0x401) | YIMIN(0x1), 0},
+	{ISP_REG_IYADJ1,	YOMAX(0x3ff) | YOMIN(0x1), 0},
+	/* config OBA */
+	{ISP_REG_OBA_CFG_0,	VSTART(0x438) | HSTART(0x0), 0},
+	{ISP_REG_OBA_CFG_1,	VEND(0x439) | HEND(0x780), 0},
+	/* config SC */
+	{ISP_REG_SCD_CFG_1,	AXI_ID(0x01), 0},
+	{ISP_REG_SC_CFG_0,	VSTART_SC(0xc) | HSTART_SC(0x0), 0},
+	{ISP_REG_SC_CFG_1,	SEL_SC(3) | AWB_PS_GRB_BA(0x10) |
+				HEIGHT_SC(0x15) | WIDTH_SC(0x1d), 0},
+	{ISP_REG_SC_AF,	AF_ES_HTHR(0x1f1) | AF_ES_VTHR(0xbf) |
+			AF_ES_VE(0x1), 0},
+	{ISP_REG_SC_AWB_PS_CFG_0,	AWB_PS_GU(0xff) | AWB_PS_GL(0x0) |
+					AWB_PS_RU(0xff) | AWB_PS_RL(0x0), 0},
+	{ISP_REG_SC_AWB_PS_CFG_1,	AWB_PS_YU(0xff) | AWB_PS_YL(0x0) |
+					AWB_PS_BU(0xff) | AWB_PS_BL(0x0), 0},
+	{ISP_REG_SC_AWB_PS_CFG_2,	AWB_PS_GRU(0xffff) |
+					AWB_PS_GRL(0x0), 0},
+	{ISP_REG_SC_AWB_PS_CFG_3,	AWB_PS_GBU(0xffff) |
+					AWB_PS_GBL(0x0), 0},
+	{ISP_REG_SC_AWB_PS_CFG_4,	AWB_PS_GRBU(0xffff) |
+					AWB_PS_GRBL(0x0), 0},
+	{ISP_REG_SC_DEC,	VKEEP(0x1) | VPERIOD(0x5) | HKEEP(0x1) |
+				HPERIOD(0x7), 0},
+	{ISP_REG_SC_AWB_WS_CW4_CFG_0,	AWB_WS_CW_W_5(0x1), 0},
+	{ISP_REG_SC_AWB_WS_CW5_CFG_0,	AWB_WS_CW_W_6(0x3) |
+					AWB_WS_CW_W_5(0xd) |
+					AWB_WS_CW_W_4(0x2), 0},
+	{ISP_REG_SC_AWB_WS_CW6_CFG_0,	AWB_WS_CW_W_5(0x9) |
+					AWB_WS_CW_W_4(0x5), 0},
+	{ISP_REG_SC_AWB_WS_CW7_CFG_0,	AWB_WS_CW_W_5(0x2) |
+					AWB_WS_CW_W_4(0x5) |
+					AWB_WS_CW_W_3(0x3), 0},
+	{ISP_REG_SC_AWB_WS_IWV_CFG_0,	AWB_WS_IW_V_7(0xf) |
+					AWB_WS_IW_V_6(0xf) |
+					AWB_WS_IW_V_5(0xf) |
+					AWB_WS_IW_V_4(0xf) |
+					AWB_WS_IW_V_3(0xf) |
+					AWB_WS_IW_V_2(0xf) |
+					AWB_WS_IW_V_1(0xf) |
+					AWB_WS_IW_V_0(0x0), 0},
+	{ISP_REG_SC_AWB_WS_IWV_CFG_1,	AWB_WS_IW_V_7(0x8) |
+					AWB_WS_IW_V_6(0xf) |
+					AWB_WS_IW_V_5(0xf) |
+					AWB_WS_IW_V_4(0xf) |
+					AWB_WS_IW_V_3(0xf) |
+					AWB_WS_IW_V_2(0xf) |
+					AWB_WS_IW_V_1(0xf) |
+					AWB_WS_IW_V_0(0xf), 0},
+	{ISP_REG_SC_AWB_WS_IWS_CFG_0,	AWB_WS_IW_S0(0x1e), 0},
+	{ISP_REG_SC_AWB_WS_IWS_CFG_3,	AWB_WS_IW_S3(0xf0) |
+					AWB_WS_IW_S2(0xf2), 0},
+	{ISP_REG_SC_AWB_WS_CFG_0,	AWB_WS_GRU(0xff) | AWB_WS_GRL(0x0) |
+					AWB_WS_RU(0xff) | AWB_WS_RL(0x0), 0},
+	{ISP_REG_SC_AWB_WS_CFG_1,	AWB_WS_BU(0xff) | AWB_WS_BL(0x0) |
+					AWB_WS_GBU(0xff) | AWB_WS_GBL(0x0), 0},
+	/* config YHIST */
+	{ISP_REG_YHIST_CFG_0,	YH_VSTART(0x0) | YH_HSTART(0x0), 0},
+	{ISP_REG_YHIST_CFG_1,	YH_HEIGHT(0x437) | YH_WIDTH(0x77f), 0},
+	{ISP_REG_YHIST_CFG_2,	YH_DEC_ETH(0x1) | YH_DEC_ETW(0x2), 0},
+	{ISP_REG_YHIST_CFG_3,	YH_MUX(0x0), 0},
+	/* config CBAR */
+	{ISP_REG_CBAR0,	CBAR_PAR_H(0x43e) | CBAR_PAR_L(0x782), 0},
+	{ISP_REG_CBAR1,	CBAR_PAR_H(0x0) | CBAR_PAR_L(0x0), 0},
+	{ISP_REG_CBAR2,	CBAR_PAR_H(0x437) | CBAR_PAR_L(0x77f), 0},
+	{ISP_REG_CBAR3,	CBAR_PAR_H(0x44) | CBAR_PAR_L(0x3150), 0},
+	{ISP_REG_CBAR4,	CBAR_PAR_H(0x0) | CBAR_PAR_L(0x0), 0},
+	{ISP_REG_CBAR5,	CBAR_PAR_H(0x0888) | CBAR_PAR_L(0x0888), 0},
+	{ISP_REG_CBAR6,	CBAR_PAR_H(0x0222) | CBAR_PAR_L(0x0222), 0},
+	{ISP_REG_CBAR7,	CBAR_PAR_H(0x0444) | CBAR_PAR_L(0x0444), 0},
+	{ISP_REG_CBAR8,	CBAR_PAR_H(0x0888) | CBAR_PAR_L(0x0888), 0},
+	{ISP_REG_CBAR9,	CBAR_PAR_H(0x0aaa) | CBAR_PAR_L(0x0aaa), 0},
+	{ISP_REG_CBAR10,	CBAR_PAR_H(0x0ccc) | CBAR_PAR_L(0x0ccc), 0},
+	{ISP_REG_CBAR11,	CBAR_PAR_H(0x0eee) | CBAR_PAR_L(0x0eee), 0},
+	{ISP_REG_CBAR12,	CBAR_PAR_H(0x0fff) | CBAR_PAR_L(0x0fff), 0},
+	{ISP_REG_CBAR13,	CBAR_PAR_H(0x0888) | CBAR_PAR_L(0x0888), 0},
+	{ISP_REG_CBAR14,	CBAR_PAR_H(0x0222) | CBAR_PAR_L(0x0222), 0},
+	{ISP_REG_CBAR15,	CBAR_PAR_H(0x0444) | CBAR_PAR_L(0x0444), 0},
+	{ISP_REG_CBAR16,	CBAR_PAR_H(0x0888) | CBAR_PAR_L(0x0888), 0},
+	{ISP_REG_CBAR17,	CBAR_PAR_H(0x0aaa) | CBAR_PAR_L(0x0aaa), 0},
+	{ISP_REG_CBAR18,	CBAR_PAR_H(0x0ccc) | CBAR_PAR_L(0x0ccc), 0},
+	{ISP_REG_CBAR19,	CBAR_PAR_H(0x0eee) | CBAR_PAR_L(0x0eee), 0},
+	{ISP_REG_CBAR20,	CBAR_PAR_H(0x0fff) | CBAR_PAR_L(0x0fff), 0},
+	/* config sensor */
+	{ISP_REG_SENSOR,	DVP_SYNC_POL(0x3) | ITU656_EN(0) |
+				IMAGER_SEL(0), 0},
+	/* config CROP */
+	{ISP_REG_PIC_CAPTURE_START_CFG,	VSTART_CAP(0x0) | HSTART_CAP(0x0), 0},
+	{ISP_REG_PIC_CAPTURE_END_CFG,	VEND_CAP(0x0437) |
+					HEND_CAP(0x077f), 0},
+	/* config isp pileline X/Y size */
+	{ISP_REG_PIPELINE_XY_SIZE,	H_ACT_CAP(0x0438) |
+					W_ACT_CAP(0x0780), 0},
+	/* config CSI dump */
+	{ISP_REG_DUMP_CFG_1,	DUMP_BURST_LEN(0x3) | DUMP_SD(0x0b80), 0},
+	/* config UO */
+	{ISP_REG_STRIDE,	IMG_STR(0x0780), 0},
+	/* NV12 */
+	{ISP_REG_PIXEL_COORDINATE_GEN,	OUT_SCANH(0x0), 0},
+
+	{ISP_REG_UOAXI,	OUT_AXI_W_ID(0x0), 0},
+	{ISP_REG_SS0S,	SD_IMG(0x780), 0},
+	{ISP_REG_SS0HF,	H_SF_SCAL(0x0) | H_SM_SCAL(0x2), 0},
+	{ISP_REG_SS0VF,	V_SF_SCAL(0x0) | V_SM_SCAL(0x2), 0},
+	{ISP_REG_SS0IW,	W_OUT(0x0780) | H_OUT(0x0438), 0},
+	{ISP_REG_SS1S,	OUT_IMG_STR(0x780), 0},
+	{ISP_REG_SS1HF,	H_SCAL_FACTOR(0x0) | H_SCAL_MODE(0x2), 0},
+	{ISP_REG_SS1VF,	V_SCAL_FACTOR(0x0) | V_SCAL_MODE(0x2), 0},
+	{ISP_REG_SS1IW,	W_OUT_IMG(0x780) | H_OUT_IMG(0x438), 0},
+	{ISP_REG_SSAXI,	SS1WID(0x0) | SS0WID(0x0), 0},
+	/* config TIL */
+	{ISP_REG_ITIIWSR,	ITI_HSIZE(0x0438) | ITI_WSIZE(0x0780), 0},
+	{ISP_REG_ITIDWLSR,	ITI_WSTRIDE(0x960), 0},
+	{ISP_REG_ITIPDFR,	ITI_PACKAGE_FMT(0x30003), 0},
+	{ISP_REG_ITIDRLSR,	ITI_STRIDE_L(0x960), 0},
+	{ISP_REG_ITIAIR,	ITI_UVRID(0x0) | ITI_YRID(0x0) |
+				ITI_UVWID(0x0) | ITI_YWID(0x0), 0},
+	{ISP_REG_ITIDPSR,	ITI_W_INDEX(0x0) | ITI_R_INDEX(0x0), 0},
+	/* Enable DEC/OBC/OECF/LCCF/AWB/SC/DUMP */
+	{ISP_REG_CSI_MODULE_CFG,	CSI_DUMP_EN | CSI_SC_EN | CSI_AWB_EN |
+					CSI_LCCF_EN | CSI_OECF_EN | CSI_OBC_EN |
+					CSI_DEC_EN, 0},
+	/* Enable CFA/CAR/CCM/GMARGB/R2Y/SHRP/SAT/DNYUV/YCRV/YHIST/CTC/DBC */
+	{ISP_REG_ISP_CTRL_1,	CTRL_SAT(1) | CTRL_DBC | CTRL_CTC | CTRL_YHIST |
+				CTRL_YCURVE | CTRL_BIYUV | CTRL_SCE | CTRL_EE |
+				CTRL_CCE | CTRL_RGE | CTRL_CME | CTRL_AE |
+				CTRL_CE, 0},
+};
+
+const struct reg_table isp_reg_init_settings[] = {
+	{isp_reg_init_config_list, ARRAY_SIZE(isp_reg_init_config_list)},
+};
+
+static const struct regval_t isp_reg_start_config_list[] = {
+	/* ENABLE UO/Multi-Frame and Reset ISP */
+	{ISP_REG_ISP_CTRL_0,	ISPC_ENUO | ISPC_ENLS | ISPC_RST, 0xa},
+	/* ENABLE UO/Multi-Frame and Leave ISP reset */
+	{ISP_REG_ISP_CTRL_0,	ISPC_ENUO | ISPC_ENLS, 0xa},
+	/* Config ISP shadow mode as next-vsync */
+	{ISP_REG_IESHD_ADDR,	SHAD_UP_M, 0},
+	/* ENABLE UO/Multi-Frame and Enable ISP */
+	{ISP_REG_ISP_CTRL_0,	ISPC_ENUO | ISPC_ENLS | ISPC_EN, 0xa},
+	/* Config CSI shadow mode as immediate to fetch current setting */
+	{ISP_REG_CSIINTS_ADDR,	CSI_SHA_M(0x10004), 0xa},
+	/* Config CSI shadow mode as next-vsync */
+	{ISP_REG_CSIINTS_ADDR,	CSI_SHA_M(0x20004), 0xa},
+	/* Enable CSI */
+	{ISP_REG_CSI_INPUT_EN_AND_STATUS,	CSI_EN_S, 0xa},
+};
+
+const struct reg_table isp_reg_start_settings[] = {
+	{isp_reg_start_config_list, ARRAY_SIZE(isp_reg_start_config_list)},
+};
+
+static void isp_load_regs(struct stfcamss *stfcamss,
+			  const struct reg_table *table)
+{
+	int j;
+	u32 delay_ms, reg_addr, val;
+
+	for (j = 0; j < table->regval_num; j++) {
+		delay_ms = table->regval[j].delay_ms;
+		reg_addr = table->regval[j].addr;
+		val = table->regval[j].val;
+
+		if (reg_addr % 4 ||
+		    reg_addr > STF_ISP_REG_OFFSET_MAX ||
+		    delay_ms > STF_ISP_REG_DELAY_MAX)
+			continue;
+
+		stf_isp_reg_write(stfcamss, reg_addr, val);
+
+		if (delay_ms)
+			usleep_range(1000 * delay_ms, 1000 * delay_ms + 100);
+	}
+}
+
+static void isp_load_regs_exclude_csi_isp_enable(struct stfcamss *stfcamss,
+						 const struct reg_table *table)
+{
+	int j;
+	u32 delay_ms, reg_addr, val;
+
+	for (j = 0; j < table->regval_num; j++) {
+		delay_ms = table->regval[j].delay_ms;
+		reg_addr = table->regval[j].addr;
+		val = table->regval[j].val;
+
+		if (reg_addr % 4 ||
+		    reg_addr > STF_ISP_REG_OFFSET_MAX ||
+		    delay_ms > STF_ISP_REG_DELAY_MAX ||
+		    (reg_addr == ISP_REG_CSI_INPUT_EN_AND_STATUS && (val & 0x01)) ||
+		    (reg_addr == ISP_REG_ISP_CTRL_0 && (val & 0x01)))
+			continue;
+
+		stf_isp_reg_write(stfcamss, reg_addr, val);
+
+		if (delay_ms)
+			usleep_range(1000 * delay_ms, 1000 * delay_ms + 100);
+	}
+}
+
+int stf_isp_clk_enable(struct stf_isp_dev *isp_dev)
+{
+	struct stfcamss *stfcamss = isp_dev->stfcamss;
+
+	clk_prepare_enable(stfcamss->sys_clk[STF_CLK_WRAPPER_CLK_C].clk);
+	reset_control_deassert(stfcamss->sys_rst[STF_RST_WRAPPER_C].rstc);
+	reset_control_deassert(stfcamss->sys_rst[STF_RST_WRAPPER_P].rstc);
+
+	return 0;
+}
+
+int stf_isp_clk_disable(struct stf_isp_dev *isp_dev)
+{
+	struct stfcamss *stfcamss = isp_dev->stfcamss;
+
+	reset_control_assert(stfcamss->sys_rst[STF_RST_WRAPPER_C].rstc);
+	reset_control_assert(stfcamss->sys_rst[STF_RST_WRAPPER_P].rstc);
+	clk_disable_unprepare(stfcamss->sys_clk[STF_CLK_WRAPPER_CLK_C].clk);
+
+	return 0;
+}
+
+int stf_isp_reset(struct stf_isp_dev *isp_dev)
+{
+	stf_isp_reg_set_bit(isp_dev->stfcamss, ISP_REG_ISP_CTRL_0,
+			    ISPC_RST_MASK, ISPC_RST);
+	stf_isp_reg_set_bit(isp_dev->stfcamss, ISP_REG_ISP_CTRL_0,
+			    ISPC_RST_MASK, 0);
+
+	return 0;
+}
+
+int stf_isp_config_set(struct stf_isp_dev *isp_dev)
+{
+	mutex_lock(&isp_dev->setfile_lock);
+	isp_load_regs(isp_dev->stfcamss, isp_reg_init_settings);
+	if (isp_dev->setfile.state)
+		isp_load_regs_exclude_csi_isp_enable(isp_dev->stfcamss,
+						     &isp_dev->setfile.settings);
+
+	mutex_unlock(&isp_dev->setfile_lock);
+
+	return 0;
+}
+
+int stf_isp_set_format(struct stf_isp_dev *isp_dev,
+		       struct isp_stream_format *crop_array,
+		       u32 mcode, int type)
+{
+	struct stfcamss *stfcamss = isp_dev->stfcamss;
+	struct v4l2_rect *crop = &crop_array[ISP_COMPOSE].rect;
+	u32 bpp = crop_array[ISP_COMPOSE].bpp;
+	u32 val, val1;
+
+	val = VSTART_CAP(crop->top) | HSTART_CAP(crop->left);
+	stf_isp_reg_write(stfcamss, ISP_REG_PIC_CAPTURE_START_CFG, val);
+
+	val = VEND_CAP(crop->height + crop->top - 1) |
+	      HEND_CAP(crop->width + crop->left - 1);
+	stf_isp_reg_write(stfcamss, ISP_REG_PIC_CAPTURE_END_CFG, val);
+
+	val = H_ACT_CAP(crop->height) | W_ACT_CAP(crop->width);
+	stf_isp_reg_write(stfcamss, ISP_REG_PIPELINE_XY_SIZE, val);
+
+	val = ALIGN(crop->width * bpp / 8, STFCAMSS_FRAME_WIDTH_ALIGN_8);
+	stf_isp_reg_write(stfcamss, ISP_REG_STRIDE, val);
+
+	switch (mcode) {
+	case MEDIA_BUS_FMT_SRGGB10_1X10:
+	case MEDIA_BUS_FMT_SRGGB8_1X8:
+		/* 3 2 3 2 1 0 1 0 B Gb B Gb Gr R Gr R */
+		val = SMY13(3) | SMY12(2) | SMY11(3) | SMY10(2) |
+		      SMY3(1) | SMY2(0) | SMY1(1) | SMY0(0);
+		val1 = CTRL_SAT(0x0);
+		break;
+	case MEDIA_BUS_FMT_SGRBG10_1X10:
+	case MEDIA_BUS_FMT_SGRBG8_1X8:
+		/* 2 3 2 3 0 1 0 1, Gb B Gb B R Gr R Gr */
+		val = SMY13(2) | SMY12(3) | SMY11(2) | SMY10(3) |
+		      SMY3(0) | SMY2(1) | SMY1(0) | SMY0(1);
+		val1 = CTRL_SAT(0x2);
+		break;
+	case MEDIA_BUS_FMT_SGBRG10_1X10:
+	case MEDIA_BUS_FMT_SGBRG8_1X8:
+		/* 1 0 1 0 3 2 3 2, Gr R Gr R B Gb B Gb */
+		val = SMY13(1) | SMY12(0) | SMY11(1) | SMY10(0) |
+		      SMY3(3) | SMY2(2) | SMY1(3) | SMY0(2);
+		val1 = CTRL_SAT(0x3);
+		break;
+	case MEDIA_BUS_FMT_SBGGR10_1X10:
+	case MEDIA_BUS_FMT_SBGGR8_1X8:
+		/* 0 1 0 1 2 3 2 3 R Gr R Gr Gb B Gb B */
+		val = SMY13(0) | SMY12(1) | SMY11(0) | SMY10(1) |
+		      SMY3(2) | SMY2(3) | SMY1(2) | SMY0(3);
+		val1 = CTRL_SAT(0x1);
+		break;
+	default:
+		dev_warn(isp_dev->stfcamss->dev, "UNKNOWN format\n");
+		val = SMY13(0) | SMY12(1) | SMY11(0) | SMY10(1) |
+		      SMY3(2) | SMY2(3) | SMY1(2) | SMY0(3);
+		val1 = CTRL_SAT(0x1);
+		break;
+	}
+	stf_isp_reg_write(stfcamss, ISP_REG_RAW_FORMAT_CFG, val);
+	stf_isp_reg_set_bit(stfcamss, ISP_REG_ISP_CTRL_1, CTRL_SAT_MASK, val1);
+
+	crop = &crop_array[ISP_CROP].rect;
+	bpp = crop_array[ISP_CROP].bpp;
+	val = ALIGN(crop->width * bpp / 8, STFCAMSS_FRAME_WIDTH_ALIGN_128);
+	val |= DUMP_BURST_LEN(3);
+	stf_isp_reg_set_bit(stfcamss, ISP_REG_DUMP_CFG_1,
+			    DUMP_BURST_LEN_MASK | DUMP_SD_MASK, val);
+
+	val = ITI_HSIZE(0x0438) | ITI_WSIZE(0x0780);
+	stf_isp_reg_write(stfcamss, ISP_REG_ITIIWSR, val);
+
+	val = ITI_WSTRIDE(0x960);
+	stf_isp_reg_write(stfcamss, ISP_REG_ITIDWLSR, val);
+
+	val = ITI_STRIDE_L(0x960);
+	stf_isp_reg_write(stfcamss, ISP_REG_ITIDRLSR, val);
+
+	val = 0x0;
+	if (type == INTERFACE_CSI)
+		val = 0x1;
+	stf_isp_reg_write(stfcamss, ISP_REG_SENSOR, val);
+
+	return 0;
+}
+
+int stf_isp_stream_set(struct stf_isp_dev *isp_dev, int on)
+{
+	if (on)
+		isp_load_regs(isp_dev->stfcamss, isp_reg_start_settings);
+	return 0;
+}
