@@ -6,13 +6,13 @@
  */
 
 #include <linux/interrupt.h>
-#include <linux/io.h>
-#include <linux/iopoll.h>
+#include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/pm_domain.h>
+#include <linux/regmap.h>
 #include <dt-bindings/power/starfive,jh7110-pmu.h>
 
 /* register offset */
@@ -59,7 +59,7 @@ struct jh71xx_pmu_match_data {
 struct jh71xx_pmu {
 	struct device *dev;
 	const struct jh71xx_pmu_match_data *match_data;
-	void __iomem *base;
+	struct regmap *base;
 	struct generic_pm_domain **genpd;
 	struct genpd_onecell_data genpd_data;
 	int irq;
@@ -75,11 +75,14 @@ struct jh71xx_pmu_dev {
 static int jh71xx_pmu_get_state(struct jh71xx_pmu_dev *pmd, u32 mask, bool *is_on)
 {
 	struct jh71xx_pmu *pmu = pmd->pmu;
+	unsigned int val;
 
 	if (!mask)
 		return -EINVAL;
 
-	*is_on = readl(pmu->base + JH71XX_PMU_CURR_POWER_MODE) & mask;
+	regmap_read(pmu->base, JH71XX_PMU_CURR_POWER_MODE, &val);
+
+	*is_on = val & mask;
 
 	return 0;
 }
@@ -130,7 +133,7 @@ static int jh71xx_pmu_set_state(struct jh71xx_pmu_dev *pmd, u32 mask, bool on)
 		encourage_hi = JH71XX_PMU_SW_ENCOURAGE_DIS_HI;
 	}
 
-	writel(mask, pmu->base + mode);
+	regmap_write(pmu->base, mode, mask);
 
 	/*
 	 * 2.Write SW encourage command sequence to the Software Encourage Reg (offset 0x44)
@@ -140,21 +143,21 @@ static int jh71xx_pmu_set_state(struct jh71xx_pmu_dev *pmd, u32 mask, bool on)
 	 *   Then write the lower bits of the command sequence, followed by the upper
 	 *   bits. The sequence differs between powering on & off a domain.
 	 */
-	writel(JH71XX_PMU_SW_ENCOURAGE_ON, pmu->base + JH71XX_PMU_SW_ENCOURAGE);
-	writel(encourage_lo, pmu->base + JH71XX_PMU_SW_ENCOURAGE);
-	writel(encourage_hi, pmu->base + JH71XX_PMU_SW_ENCOURAGE);
+	regmap_write(pmu->base, JH71XX_PMU_SW_ENCOURAGE, JH71XX_PMU_SW_ENCOURAGE_ON);
+	regmap_write(pmu->base, JH71XX_PMU_SW_ENCOURAGE, encourage_lo);
+	regmap_write(pmu->base, JH71XX_PMU_SW_ENCOURAGE, encourage_hi);
 
 	spin_unlock_irqrestore(&pmu->lock, flags);
 
 	/* Wait for the power domain bit to be enabled / disabled */
 	if (on) {
-		ret = readl_poll_timeout_atomic(pmu->base + JH71XX_PMU_CURR_POWER_MODE,
-						val, val & mask,
-						1, JH71XX_PMU_TIMEOUT_US);
+		ret = regmap_read_poll_timeout_atomic(pmu->base, JH71XX_PMU_CURR_POWER_MODE,
+						      val, val & mask,
+						      1, JH71XX_PMU_TIMEOUT_US);
 	} else {
-		ret = readl_poll_timeout_atomic(pmu->base + JH71XX_PMU_CURR_POWER_MODE,
-						val, !(val & mask),
-						1, JH71XX_PMU_TIMEOUT_US);
+		ret = regmap_read_poll_timeout_atomic(pmu->base, JH71XX_PMU_CURR_POWER_MODE,
+						      val, !(val & mask),
+						      1, JH71XX_PMU_TIMEOUT_US);
 	}
 
 	if (ret) {
@@ -190,14 +193,14 @@ static void jh71xx_pmu_int_enable(struct jh71xx_pmu *pmu, u32 mask, bool enable)
 	unsigned long flags;
 
 	spin_lock_irqsave(&pmu->lock, flags);
-	val = readl(pmu->base + JH71XX_PMU_TIMER_INT_MASK);
+	regmap_read(pmu->base, JH71XX_PMU_TIMER_INT_MASK, &val);
 
 	if (enable)
 		val &= ~mask;
 	else
 		val |= mask;
 
-	writel(val, pmu->base + JH71XX_PMU_TIMER_INT_MASK);
+	regmap_write(pmu->base, JH71XX_PMU_TIMER_INT_MASK, val);
 	spin_unlock_irqrestore(&pmu->lock, flags);
 }
 
@@ -206,7 +209,7 @@ static irqreturn_t jh71xx_pmu_interrupt(int irq, void *data)
 	struct jh71xx_pmu *pmu = data;
 	u32 val;
 
-	val = readl(pmu->base + JH71XX_PMU_INT_STATUS);
+	regmap_read(pmu->base, JH71XX_PMU_INT_STATUS, &val);
 
 	if (val & JH71XX_PMU_INT_SEQ_DONE)
 		dev_dbg(pmu->dev, "sequence done.\n");
@@ -220,8 +223,8 @@ static irqreturn_t jh71xx_pmu_interrupt(int irq, void *data)
 		dev_err(pmu->dev, "p-channel fail event.\n");
 
 	/* clear interrupts */
-	writel(val, pmu->base + JH71XX_PMU_INT_STATUS);
-	writel(val, pmu->base + JH71XX_PMU_EVENT_STATUS);
+	regmap_write(pmu->base, JH71XX_PMU_INT_STATUS, val);
+	regmap_write(pmu->base, JH71XX_PMU_EVENT_STATUS, val);
 
 	return IRQ_HANDLED;
 }
@@ -271,7 +274,7 @@ static int jh71xx_pmu_probe(struct platform_device *pdev)
 	if (!pmu)
 		return -ENOMEM;
 
-	pmu->base = devm_platform_ioremap_resource(pdev, 0);
+	pmu->base = device_node_to_regmap(np);
 	if (IS_ERR(pmu->base))
 		return PTR_ERR(pmu->base);
 
