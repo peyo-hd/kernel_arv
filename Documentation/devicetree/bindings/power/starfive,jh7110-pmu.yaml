@@ -8,6 +8,7 @@ title: StarFive JH7110 Power Management Unit
 
 maintainers:
   - Walker Chen <walker.chen@starfivetech.com>
+  - Changhuang Liang <changhuang.liang@starfivetech.com>
 
 description: |
   StarFive JH7110 SoC includes support for multiple power domains which can be
@@ -17,6 +18,7 @@ properties:
   compatible:
     enum:
       - starfive,jh7110-pmu
+      - starfive,jh7110-aon-pmu
 
   reg:
     maxItems: 1
@@ -29,9 +31,18 @@ properties:
 
 required:
   - compatible
-  - reg
-  - interrupts
   - "#power-domain-cells"
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: starfive,jh7110-pmu
+    then:
+      required:
+        - reg
+        - interrupts
 
 additionalProperties: false
 
