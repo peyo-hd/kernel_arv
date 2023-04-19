@@ -51,9 +51,17 @@ struct jh71xx_domain_info {
 	u8 bit;
 };
 
+struct jh71xx_pmu;
+struct jh71xx_pmu_dev;
+
 struct jh71xx_pmu_match_data {
 	const struct jh71xx_domain_info *domain_info;
 	int num_domains;
+	unsigned int pmu_status;
+	int (*pmu_parse_dt)(struct platform_device *pdev,
+			    struct jh71xx_pmu *pmu);
+	int (*pmu_set_state)(struct jh71xx_pmu_dev *pmd,
+			     u32 mask, bool on);
 };
 
 struct jh71xx_pmu {
@@ -80,14 +88,14 @@ static int jh71xx_pmu_get_state(struct jh71xx_pmu_dev *pmd, u32 mask, bool *is_o
 	if (!mask)
 		return -EINVAL;
 
-	regmap_read(pmu->base, JH71XX_PMU_CURR_POWER_MODE, &val);
+	regmap_read(pmu->base, pmu->match_data->pmu_status, &val);
 
 	*is_on = val & mask;
 
 	return 0;
 }
 
-static int jh71xx_pmu_set_state(struct jh71xx_pmu_dev *pmd, u32 mask, bool on)
+static int jh7110_pmu_set_state(struct jh71xx_pmu_dev *pmd, u32 mask, bool on)
 {
 	struct jh71xx_pmu *pmu = pmd->pmu;
 	unsigned long flags;
@@ -95,21 +103,7 @@ static int jh71xx_pmu_set_state(struct jh71xx_pmu_dev *pmd, u32 mask, bool on)
 	u32 mode;
 	u32 encourage_lo;
 	u32 encourage_hi;
-	bool is_on;
 	int ret;
-
-	ret = jh71xx_pmu_get_state(pmd, mask, &is_on);
-	if (ret) {
-		dev_dbg(pmu->dev, "unable to get current state for %s\n",
-			pmd->genpd.name);
-		return ret;
-	}
-
-	if (is_on == on) {
-		dev_dbg(pmu->dev, "pm domain [%s] is already %sable status.\n",
-			pmd->genpd.name, on ? "en" : "dis");
-		return 0;
-	}
 
 	spin_lock_irqsave(&pmu->lock, flags);
 
@@ -167,6 +161,29 @@ static int jh71xx_pmu_set_state(struct jh71xx_pmu_dev *pmd, u32 mask, bool on)
 	}
 
 	return 0;
+}
+
+static int jh71xx_pmu_set_state(struct jh71xx_pmu_dev *pmd, u32 mask, bool on)
+{
+	struct jh71xx_pmu *pmu = pmd->pmu;
+	const struct jh71xx_pmu_match_data *match_data = pmu->match_data;
+	bool is_on;
+	int ret;
+
+	ret = jh71xx_pmu_get_state(pmd, mask, &is_on);
+	if (ret) {
+		dev_dbg(pmu->dev, "unable to get current state for %s\n",
+			pmd->genpd.name);
+		return ret;
+	}
+
+	if (is_on == on) {
+		dev_dbg(pmu->dev, "pm domain [%s] is already %sable status.\n",
+			pmd->genpd.name, on ? "en" : "dis");
+		return 0;
+	}
+
+	return match_data->pmu_set_state(pmd, mask, on);
 }
 
 static int jh71xx_pmu_on(struct generic_pm_domain *genpd)
@@ -229,6 +246,30 @@ static irqreturn_t jh71xx_pmu_interrupt(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+static int jh7110_pmu_parse_dt(struct platform_device *pdev, struct jh71xx_pmu *pmu)
+{
+	struct device *dev = &pdev->dev;
+	struct device_node *np = dev->of_node;
+	int ret;
+
+	pmu->base = device_node_to_regmap(np);
+	if (IS_ERR(pmu->base))
+		return PTR_ERR(pmu->base);
+
+	pmu->irq = platform_get_irq(pdev, 0);
+	if (pmu->irq < 0)
+		return pmu->irq;
+
+	ret = devm_request_irq(dev, pmu->irq, jh71xx_pmu_interrupt,
+			       0, pdev->name, pmu);
+	if (ret)
+		dev_err(dev, "failed to request irq\n");
+
+	jh71xx_pmu_int_enable(pmu, JH71XX_PMU_INT_ALL_MASK & ~JH71XX_PMU_INT_PCH_FAIL, true);
+
+	return 0;
+}
+
 static int jh71xx_pmu_init_domain(struct jh71xx_pmu *pmu, int index)
 {
 	struct jh71xx_pmu_dev *pmd;
@@ -274,22 +315,17 @@ static int jh71xx_pmu_probe(struct platform_device *pdev)
 	if (!pmu)
 		return -ENOMEM;
 
-	pmu->base = device_node_to_regmap(np);
-	if (IS_ERR(pmu->base))
-		return PTR_ERR(pmu->base);
-
-	pmu->irq = platform_get_irq(pdev, 0);
-	if (pmu->irq < 0)
-		return pmu->irq;
-
-	ret = devm_request_irq(dev, pmu->irq, jh71xx_pmu_interrupt,
-			       0, pdev->name, pmu);
-	if (ret)
-		dev_err(dev, "failed to request irq\n");
+	spin_lock_init(&pmu->lock);
 
 	match_data = of_device_get_match_data(dev);
 	if (!match_data)
 		return -EINVAL;
+
+	ret = match_data->pmu_parse_dt(pdev, pmu);
+	if (ret) {
+		dev_err(dev, "failed to parse dt\n");
+		return ret;
+	}
 
 	pmu->genpd = devm_kcalloc(dev, match_data->num_domains,
 				  sizeof(struct generic_pm_domain *),
@@ -309,9 +345,6 @@ static int jh71xx_pmu_probe(struct platform_device *pdev)
 			return ret;
 		}
 	}
-
-	spin_lock_init(&pmu->lock);
-	jh71xx_pmu_int_enable(pmu, JH71XX_PMU_INT_ALL_MASK & ~JH71XX_PMU_INT_PCH_FAIL, true);
 
 	ret = of_genpd_add_provider_onecell(np, &pmu->genpd_data);
 	if (ret) {
@@ -360,6 +393,9 @@ static const struct jh71xx_domain_info jh7110_power_domains[] = {
 static const struct jh71xx_pmu_match_data jh7110_pmu = {
 	.num_domains = ARRAY_SIZE(jh7110_power_domains),
 	.domain_info = jh7110_power_domains,
+	.pmu_status = JH71XX_PMU_CURR_POWER_MODE,
+	.pmu_parse_dt = jh7110_pmu_parse_dt,
+	.pmu_set_state = jh7110_pmu_set_state,
 };
 
 static const struct of_device_id jh71xx_pmu_of_match[] = {
