@@ -38,6 +38,9 @@ struct cdns_role_driver {
 };
 
 #define CDNS_XHCI_RESOURCES_NUM	2
+#define CDNS_IOMEM_RESOURCES_NUM	3
+#define CDNS_IRQ_RESOURCES_NUM		4
+#define CDNS_RESOURCES_NUM	(CDNS_IOMEM_RESOURCES_NUM + CDNS_IRQ_RESOURCES_NUM)
 
 struct cdns3_platform_data {
 	int (*platform_suspend)(struct device *dev,
