@@ -28,6 +28,7 @@ properties:
           - enum:
               - starfive,visionfive-2-v1.2a
               - starfive,visionfive-2-v1.3b
+              - starfive,visionfive-2-audio
           - const: starfive,jh7110
 
 additionalProperties: true
