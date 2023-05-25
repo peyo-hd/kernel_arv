@@ -12,12 +12,14 @@
 #include "vkms_formats.h"
 
 static const u32 vkms_formats[] = {
+	DRM_FORMAT_ABGR8888,
 	DRM_FORMAT_XRGB8888,
 	DRM_FORMAT_XRGB16161616,
 	DRM_FORMAT_RGB565
 };
 
 static const u32 vkms_plane_formats[] = {
+	DRM_FORMAT_ABGR8888,
 	DRM_FORMAT_ARGB8888,
 	DRM_FORMAT_XRGB8888,
 	DRM_FORMAT_XRGB16161616,
