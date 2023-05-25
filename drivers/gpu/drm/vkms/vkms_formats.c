@@ -42,6 +42,28 @@ static void *get_packed_src_addr(const struct vkms_frame_info *frame_info, int y
 	return packed_pixels_addr(frame_info, x_src, y_src);
 }
 
+static void ABGR8888_to_argb_u16(struct line_buffer *stage_buffer,
+				 const struct vkms_frame_info *frame_info, int y)
+{
+	struct pixel_argb_u16 *out_pixels = stage_buffer->pixels;
+	u8 *src_pixels = get_packed_src_addr(frame_info, y);
+	int x_limit = min_t(size_t, drm_rect_width(&frame_info->dst),
+			    stage_buffer->n_pixels);
+
+	for (size_t x = 0; x < x_limit; x++, src_pixels += 4) {
+		/*
+		 * The 257 is the "conversion ratio". This number is obtained by the
+		 * (2^16 - 1) / (2^8 - 1) division. Which, in this case, tries to get
+		 * the best color value in a pixel format with more possibilities.
+		 * A similar idea applies to others RGB color conversions.
+		 */
+		out_pixels[x].a = (u16)src_pixels[3] * 257;
+		out_pixels[x].r = (u16)src_pixels[0] * 257;
+		out_pixels[x].g = (u16)src_pixels[1] * 257;
+		out_pixels[x].b = (u16)src_pixels[2] * 257;
+	}
+}
+
 static void ARGB8888_to_argb_u16(struct line_buffer *stage_buffer,
 				 const struct vkms_frame_info *frame_info, int y)
 {
@@ -146,6 +168,33 @@ static void RGB565_to_argb_u16(struct line_buffer *stage_buffer,
  * They are used in the `compose_active_planes` to convert and store a line
  * from the src_buffer to the writeback buffer.
  */
+static void argb_u16_to_ABGR8888(struct vkms_frame_info *frame_info,
+				 const struct line_buffer *src_buffer, int y)
+{
+	int x_dst = frame_info->dst.x1;
+	u8 *dst_pixels = packed_pixels_addr(frame_info, x_dst, y);
+	struct pixel_argb_u16 *in_pixels = src_buffer->pixels;
+	int x_limit = min_t(size_t, drm_rect_width(&frame_info->dst),
+			    src_buffer->n_pixels);
+
+	for (size_t x = 0; x < x_limit; x++, dst_pixels += 4) {
+		/*
+		 * This sequence below is important because the format's byte order is
+		 * in little-endian. In the case of the ABGR8888 the memory is
+		 * organized this way:
+		 *
+		 * | Addr + 2 | = blue channel
+		 * | Addr + 1 | = green channel
+		 * | Addr + 0 | = Red channel
+		 * | Addr + 3 | = Alpha channel
+		 */
+		dst_pixels[3] = DIV_ROUND_CLOSEST(in_pixels[x].a, 257);
+		dst_pixels[0] = DIV_ROUND_CLOSEST(in_pixels[x].r, 257);
+		dst_pixels[1] = DIV_ROUND_CLOSEST(in_pixels[x].g, 257);
+		dst_pixels[2] = DIV_ROUND_CLOSEST(in_pixels[x].b, 257);
+	}
+}
+
 static void argb_u16_to_ARGB8888(struct vkms_frame_info *frame_info,
 				 const struct line_buffer *src_buffer, int y)
 {
@@ -252,6 +301,8 @@ static void argb_u16_to_RGB565(struct vkms_frame_info *frame_info,
 void *get_frame_to_line_function(u32 format)
 {
 	switch (format) {
+	case DRM_FORMAT_ABGR8888:
+		return &ABGR8888_to_argb_u16;
 	case DRM_FORMAT_ARGB8888:
 		return &ARGB8888_to_argb_u16;
 	case DRM_FORMAT_XRGB8888:
@@ -270,6 +321,8 @@ void *get_frame_to_line_function(u32 format)
 void *get_line_to_frame_function(u32 format)
 {
 	switch (format) {
+	case DRM_FORMAT_ABGR8888:
+		return &argb_u16_to_ABGR8888;
 	case DRM_FORMAT_ARGB8888:
 		return &argb_u16_to_ARGB8888;
 	case DRM_FORMAT_XRGB8888:
