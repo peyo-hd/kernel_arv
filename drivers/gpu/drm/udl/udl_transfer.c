@@ -28,9 +28,9 @@
 
 static inline u16 pixel32_to_be16(const uint32_t pixel)
 {
-	return (((pixel >> 3) & 0x001f) |
+	return (((pixel >> 19) & 0x001f) |
 		((pixel >> 5) & 0x07e0) |
-		((pixel >> 8) & 0xf800));
+		((pixel << 8) & 0xf800));
 }
 
 static inline u16 get_pixel_val16(const uint8_t *pixel, int log_bpp)
