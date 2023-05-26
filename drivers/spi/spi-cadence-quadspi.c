@@ -1624,6 +1624,7 @@ static int cqspi_setup_flash(struct cqspi_st *cqspi)
 static int cqspi_probe(struct platform_device *pdev)
 {
 	const struct cqspi_driver_platdata *ddata;
+	struct clk *qspi_ahb, *qspi_apb;
 	struct reset_control *rstc, *rstc_ocp, *rstc_ref;
 	struct device *dev = &pdev->dev;
 	struct spi_master *master;
@@ -1715,6 +1716,32 @@ static int cqspi_probe(struct platform_device *pdev)
 	}
 
 	if (of_device_is_compatible(pdev->dev.of_node, "starfive,jh7110-qspi")) {
+		qspi_ahb = devm_clk_get(dev, "qspi-ahb");
+		if (IS_ERR(qspi_ahb)) {
+			dev_err(dev, "Cannot claim QSPI_AHB clock.\n");
+			ret = PTR_ERR(qspi_ahb);
+			return ret;
+		}
+
+		ret = clk_prepare_enable(qspi_ahb);
+		if (ret) {
+			dev_err(dev, "Cannot enable QSPI AHB clock.\n");
+			goto probe_clk_failed;
+		}
+
+		qspi_apb = devm_clk_get(dev, "qspi-apb");
+		if (IS_ERR(qspi_apb)) {
+			dev_err(dev, "Cannot claim QSPI_APB clock.\n");
+			ret = PTR_ERR(qspi_apb);
+			return ret;
+		}
+
+		ret = clk_prepare_enable(qspi_apb);
+		if (ret) {
+			dev_err(dev, "Cannot enable QSPI APB clock.\n");
+			goto probe_clk_failed;
+		}
+
 		rstc_ref = devm_reset_control_get_optional_exclusive(dev, "rstc_ref");
 		if (IS_ERR(rstc_ref)) {
 			ret = PTR_ERR(rstc_ref);
