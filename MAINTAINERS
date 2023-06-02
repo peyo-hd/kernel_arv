@@ -7059,6 +7059,8 @@ L:	dri-devel@lists.freedesktop.org
 S:	Maintained
 T:	git git://anongit.freedesktop.org/drm/drm-misc
 F:	Documentation/devicetree/bindings/display/verisilicon/
+F:	drivers/gpu/drm/verisilicon/
+F:	include/uapi/drm/vs_drm.h
 
 DRM DRIVERS FOR VIVANTE GPU IP
 M:	Lucas Stach <l.stach@pengutronix.de>
