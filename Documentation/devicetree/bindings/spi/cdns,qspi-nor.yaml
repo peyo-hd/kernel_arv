@@ -26,6 +26,15 @@ allOf:
             const: starfive,jh7110-qspi
     then:
       properties:
+        clocks:
+          maxItems: 3
+
+        clock-names:
+          items:
+            - const: ref_clk
+            - const: hclk
+            - const: pclk
+
         resets:
           minItems: 2
           maxItems: 3
@@ -38,6 +47,9 @@ allOf:
 
     else:
       properties:
+        clocks:
+          maxItems: 1
+
         resets:
           maxItems: 2
 
@@ -67,9 +79,6 @@ properties:
       - description: the controller data area
 
   interrupts:
-    maxItems: 1
-
-  clocks:
     maxItems: 1
 
   cdns,fifo-depth:
